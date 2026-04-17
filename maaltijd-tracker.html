@@ -1,0 +1,1197 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Maaltijd Tracker</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="module">
+  // Firebase (modular v10) via CDN
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getAuth, signInAnonymously, onAuthStateChanged
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import {
+    getFirestore, doc, setDoc, getDoc, collection, getDocs, query, where, orderBy, onSnapshot, updateDoc, arrayUnion, serverTimestamp
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+  window._firebase = {
+    initializeApp, getAuth, signInAnonymously, onAuthStateChanged,
+    getFirestore, doc, setDoc, getDoc, collection, getDocs, query, where, orderBy, onSnapshot, updateDoc, arrayUnion, serverTimestamp
+  };
+  window.dispatchEvent(new Event('firebase-ready'));
+</script>
+<style>
+  html, body, #root { height: 100%; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .chat-bubble { white-space: pre-wrap; word-break: break-word; }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+</style>
+</head>
+<body class="bg-slate-50">
+<div id="root">Laden…</div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+/* ============================================================
+   CONFIG & STORAGE
+   ============================================================ */
+const LS_KEYS = {
+  anthropicKey: 'mt_anthropic_key',
+  firebaseConfig: 'mt_firebase_config',
+  profile: 'mt_profile',
+};
+
+const DEFAULT_PROFILE = {
+  name: '',
+  gender: 'v',           // 'v' of 'm'
+  age: 30,
+  weightKg: 70,
+  heightCm: 170,
+  activity: 'matig',     // laag | matig | hoog
+  goal: 'onderhoud',     // afvallen | onderhoud | aankomen
+};
+
+// Richtlijnen (Gezondheidsraad / Voedingscentrum, grove benadering)
+function calcDailyTargets(p) {
+  // BMR (Mifflin-St Jeor)
+  const s = p.gender === 'm' ? 5 : -161;
+  const bmr = 10 * p.weightKg + 6.25 * p.heightCm - 5 * p.age + s;
+  const actMap = { laag: 1.4, matig: 1.65, hoog: 1.9 };
+  const tdee = bmr * (actMap[p.activity] || 1.65);
+  const goalAdj = p.goal === 'afvallen' ? -400 : p.goal === 'aankomen' ? 300 : 0;
+  const kcal = Math.round(tdee + goalAdj);
+
+  return {
+    kcal,
+    eiwit_g: Math.round(p.weightKg * 0.9),            // ~0.8-1.0 g/kg
+    vet_g: Math.round((kcal * 0.30) / 9),
+    koolhydraten_g: Math.round((kcal * 0.50) / 4),
+    vezels_g: p.gender === 'm' ? 40 : 30,
+    verzadigd_vet_g: Math.round((kcal * 0.10) / 9),
+    suikers_g: Math.round((kcal * 0.10) / 4),         // max richtlijn toegevoegde suikers
+    zout_g: 6,
+    water_ml: Math.round(p.weightKg * 30),
+    // Micro
+    ijzer_mg: p.gender === 'v' ? 15 : 11,
+    calcium_mg: 1000,
+    magnesium_mg: p.gender === 'v' ? 300 : 350,
+    kalium_mg: 3500,
+    vitC_mg: 75,
+    vitD_ug: 10,
+    vitB12_ug: 2.8,
+    foliumzuur_ug: 300,
+  };
+}
+
+const NUTRIENT_LABELS = {
+  kcal: 'Calorieën',
+  eiwit_g: 'Eiwit',
+  vet_g: 'Vet',
+  verzadigd_vet_g: 'Verzadigd vet',
+  koolhydraten_g: 'Koolhydraten',
+  suikers_g: 'Suikers',
+  vezels_g: 'Vezels',
+  zout_g: 'Zout',
+  water_ml: 'Water',
+  ijzer_mg: 'IJzer',
+  calcium_mg: 'Calcium',
+  magnesium_mg: 'Magnesium',
+  kalium_mg: 'Kalium',
+  vitC_mg: 'Vit. C',
+  vitD_ug: 'Vit. D',
+  vitB12_ug: 'Vit. B12',
+  foliumzuur_ug: 'Foliumzuur',
+};
+
+const NUTRIENT_UNITS = {
+  kcal: 'kcal', eiwit_g: 'g', vet_g: 'g', verzadigd_vet_g: 'g',
+  koolhydraten_g: 'g', suikers_g: 'g', vezels_g: 'g', zout_g: 'g',
+  water_ml: 'ml', ijzer_mg: 'mg', calcium_mg: 'mg', magnesium_mg: 'mg',
+  kalium_mg: 'mg', vitC_mg: 'mg', vitD_ug: 'µg', vitB12_ug: 'µg',
+  foliumzuur_ug: 'µg',
+};
+
+const PRIMARY_NUTRIENTS = ['kcal','eiwit_g','koolhydraten_g','vet_g','vezels_g'];
+
+function todayISO() {
+  const d = new Date();
+  return d.toISOString().slice(0, 10);
+}
+function formatDateNL(iso) {
+  const d = new Date(iso + 'T12:00:00');
+  return d.toLocaleDateString('nl-NL', { weekday: 'long', day: 'numeric', month: 'long' });
+}
+function shortDateNL(iso) {
+  const d = new Date(iso + 'T12:00:00');
+  return d.toLocaleDateString('nl-NL', { day: 'numeric', month: 'short' });
+}
+
+function sumEntries(entries) {
+  const totals = {};
+  for (const e of entries || []) {
+    for (const key of Object.keys(NUTRIENT_LABELS)) {
+      totals[key] = (totals[key] || 0) + (Number(e[key]) || 0);
+    }
+  }
+  return totals;
+}
+
+/* ============================================================
+   CLAUDE API CLIENT (browser)
+   ============================================================ */
+const SYSTEM_PROMPT_BASE = `Je bent een Nederlandse voedingscoach die meehelpt bij een persoonlijke maaltijdregistratie.
+Je kent Nederlandse voedingsmiddelen, merkproducten en typische portiegroottes goed (denk NEVO-stijl).
+Je taal: Nederlands, warm, beknopt, niet belerend.
+
+Taken:
+1. Leid uit de input van de gebruiker af wát er gegeten/gedronken is en in welke hoeveelheid.
+2. Als iets onduidelijk is (hoeveelheid, welk merk, welk beleg, drankje erbij op basis van context) stel je MAX 1-2 gerichte vervolgvragen. Geen vragenlijst.
+3. Gebruik bekende patronen van eerder vandaag/deze week om zinvolle vervolgvragen te stellen (bv. "je hebt meestal 's avonds een wijntje, ook vandaag?").
+4. Zodra je voldoende zekerheid hebt, schat je de voedingswaarden per item en totaal.
+5. Houd het kort en conversationeel.
+
+BELANGRIJK — output-contract:
+SCHRIJF GEEN ENKELE TEKST BUITEN HET JSON-BLOK. Geen uitleg, geen samenvatting, geen opsomming van items.
+Je hele antwoord bestaat uit precies ÉÉN codeblock met tag \`\`\`meal_data ... \`\`\`.
+Alle conversationele tekst die de gebruiker mag zien zet je uitsluitend in het "reply"-veld in de JSON.
+Daarin staat strikt geldige JSON met dit schema:
+
+{
+  "status": "complete" | "needs_clarification",
+  "reply": "korte conversationele tekst voor de gebruiker",
+  "items": [
+    {
+      "naam": "string (NL, bv. 'Bruine boterham met jonge kaas')",
+      "hoeveelheid": "string (bv. '1 snee (35 g) + 20 g kaas')",
+      "kcal": number, "eiwit_g": number, "vet_g": number,
+      "verzadigd_vet_g": number, "koolhydraten_g": number, "suikers_g": number,
+      "vezels_g": number, "zout_g": number, "water_ml": number,
+      "ijzer_mg": number, "calcium_mg": number, "magnesium_mg": number,
+      "kalium_mg": number, "vitC_mg": number, "vitD_ug": number,
+      "vitB12_ug": number, "foliumzuur_ug": number
+    }
+  ]
+}
+
+- Bij status "needs_clarification": items mag leeg zijn en "reply" bevat je vervolgvraag.
+- Bij status "complete": items bevat alle nieuwe items uit dít bericht (niet alle items van de dag) met geschatte waarden.
+- Zet onbekende micro's op 0 i.p.v. weglaten.
+- Gebruik realistische NL-portiegroottes als de gebruiker geen gram noemt.
+- "reply" mag een korte bevestiging zijn (1-3 zinnen, geen lange opsomming — items staan immers al in het dagoverzicht).
+`;
+
+const ANALYSIS_SYSTEM = `Je bent een voedingscoach die op basis van geregistreerde dagtotalen korte, inzichtvolle analyses geeft.
+Taal: Nederlands. Wees concreet, noem getallen, wijs op tekorten/overschotten t.o.v. de dagdoelen, en sluit af met 1-2 actiepunten.
+Geen JSON nodig. Gewone markdown is prima.`;
+
+async function callClaude({ apiKey, system, messages, max_tokens = 4000 }) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens,
+      system,
+      messages,
+    }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Claude API error ${res.status}: ${txt}`);
+  }
+  const data = await res.json();
+  const text = (data.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+  return text;
+}
+
+function extractMealData(text) {
+  // Prefer a properly-closed block
+  const closed = text.match(/```meal_data\s*([\s\S]*?)```/);
+  if (closed) {
+    try { return JSON.parse(closed[1].trim()); }
+    catch (e) { console.warn('JSON parse error (closed)', e); }
+  }
+  // Fallback: block was truncated — try to parse whatever we have
+  const open = text.match(/```meal_data\s*([\s\S]*)$/);
+  if (open) {
+    let raw = open[1].replace(/```$/, '').trim();
+    // Attempt to close open braces/brackets naively
+    const opens = (raw.match(/[\{\[]/g) || []).length;
+    const closes = (raw.match(/[\}\]]/g) || []).length;
+    // Strip trailing partial object (everything after last full item closing)
+    try {
+      return JSON.parse(raw);
+    } catch (_) {
+      // try trimming trailing incomplete tokens
+      const lastBrace = raw.lastIndexOf('}');
+      if (lastBrace > 0) {
+        let candidate = raw.slice(0, lastBrace + 1);
+        // close any outstanding [ or {
+        const o2 = (candidate.match(/[\{\[]/g) || []).length;
+        const c2 = (candidate.match(/[\}\]]/g) || []).length;
+        candidate = candidate + ']'.repeat(Math.max(0, o2 - c2 - 1)) + '}';
+        try { return JSON.parse(candidate); } catch (e) { console.warn('JSON parse error (truncated)', e); }
+      }
+    }
+  }
+  return null;
+}
+// Strip the meal_data block aggressively — even if the closing ``` is missing
+// (truncated response), so the raw JSON never leaks into the chat bubble.
+function stripMealData(text) {
+  return text
+    .replace(/```meal_data[\s\S]*?```/g, '')
+    .replace(/```meal_data[\s\S]*$/g, '')
+    .trim();
+}
+
+/* ============================================================
+   FIREBASE HELPERS
+   ============================================================ */
+function useFirebase(config) {
+  const [fb, setFb] = useState(null);
+  const [uid, setUid] = useState(null);
+  const [error, setError] = useState(null);
+  const [phase, setPhase] = useState('idle'); // idle | loading-sdk | init | signing-in | ready | error
+
+  useEffect(() => {
+    if (!config || !config.apiKey || !config.projectId) { setPhase('idle'); return; }
+    let cancelled = false;
+    setPhase('loading-sdk');
+    function init() {
+      if (cancelled) return;
+      const F = window._firebase;
+      if (!F) {
+        window.addEventListener('firebase-ready', init, { once: true });
+        return;
+      }
+      try {
+        setPhase('init');
+        const app = F.initializeApp(config);
+        const auth = F.getAuth(app);
+        const db = F.getFirestore(app);
+        setPhase('signing-in');
+        F.signInAnonymously(auth).catch(err => {
+          if (cancelled) return;
+          setError('Anonymous sign-in mislukt: ' + err.message + ' — check of Anonymous auth aan staat in Firebase → Authentication → Sign-in method.');
+          setPhase('error');
+        });
+        F.onAuthStateChanged(auth, (u) => {
+          if (!cancelled && u) { setUid(u.uid); setFb({ app, auth, db, F }); setPhase('ready'); setError(null); }
+        });
+      } catch (e) {
+        if (!cancelled) { setError(e.message); setPhase('error'); }
+      }
+    }
+    init();
+    return () => { cancelled = true; };
+  }, [config && config.apiKey, config && config.projectId]);
+
+  return { fb, uid, error, phase };
+}
+
+async function saveDay(fb, uid, date, dayData) {
+  const F = fb.F;
+  const ref = F.doc(fb.db, 'users', uid, 'days', date);
+  await F.setDoc(ref, { ...dayData, updatedAt: F.serverTimestamp() }, { merge: true });
+}
+
+async function loadDay(fb, uid, date) {
+  const F = fb.F;
+  const ref = F.doc(fb.db, 'users', uid, 'days', date);
+  const snap = await F.getDoc(ref);
+  return snap.exists() ? snap.data() : null;
+}
+
+async function loadMonth(fb, uid, yyyymm) {
+  const F = fb.F;
+  const colRef = F.collection(fb.db, 'users', uid, 'days');
+  const snap = await F.getDocs(colRef);
+  const out = {};
+  snap.forEach(d => {
+    if (d.id.startsWith(yyyymm)) out[d.id] = d.data();
+  });
+  return out;
+}
+
+/* ============================================================
+   UI COMPONENTS
+   ============================================================ */
+
+function NutrientBar({ label, value, target, unit }) {
+  const pct = Math.min(100, Math.round((value / Math.max(target, 1)) * 100));
+  const over = value > target * 1.1;
+  const under = value < target * 0.6;
+  const color = over ? 'bg-red-400' : under ? 'bg-amber-400' : 'bg-emerald-500';
+  return (
+    <div className="mb-2">
+      <div className="flex justify-between text-xs text-slate-600 mb-1">
+        <span>{label}</span>
+        <span className="tabular-nums">
+          {Math.round(value)} / {target} {unit}
+        </span>
+      </div>
+      <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+        <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+const MACRO_NUTRIENTS = ['kcal','eiwit_g','koolhydraten_g','vet_g','verzadigd_vet_g','suikers_g','vezels_g','zout_g','water_ml'];
+const MICRO_NUTRIENTS = ['ijzer_mg','calcium_mg','magnesium_mg','kalium_mg','vitC_mg','vitD_ug','vitB12_ug','foliumzuur_ug'];
+
+function DaySummary({ day, targets }) {
+  const totals = useMemo(() => sumEntries(day?.entries || []), [day]);
+  const kcalPct = Math.round(((totals.kcal || 0) / (targets.kcal || 1)) * 100);
+  return (
+    <div className="bg-white rounded-xl p-4 shadow-sm">
+      <div className="flex items-baseline justify-between mb-3">
+        <h3 className="font-semibold text-slate-800">Dagtotalen</h3>
+        <div className="text-xs text-slate-500 tabular-nums">
+          {Math.round(totals.kcal || 0)} / {targets.kcal} kcal ({kcalPct}%)
+        </div>
+      </div>
+
+      <div className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1.5">Macro&apos;s</div>
+      {MACRO_NUTRIENTS.map(k => (
+        <NutrientBar
+          key={k}
+          label={NUTRIENT_LABELS[k]}
+          value={totals[k] || 0}
+          target={targets[k] || 1}
+          unit={NUTRIENT_UNITS[k]}
+        />
+      ))}
+
+      <div className="text-xs font-medium text-slate-500 uppercase tracking-wide mt-4 mb-1.5">Micronutriënten</div>
+      {MICRO_NUTRIENTS.map(k => (
+        <NutrientBar
+          key={k}
+          label={NUTRIENT_LABELS[k]}
+          value={totals[k] || 0}
+          target={targets[k] || 1}
+          unit={NUTRIENT_UNITS[k]}
+        />
+      ))}
+    </div>
+  );
+}
+
+function EntriesList({ entries, onDelete }) {
+  if (!entries || entries.length === 0) {
+    return <div className="text-sm text-slate-500 italic">Niks geregistreerd op deze dag.</div>;
+  }
+  function handleDelete(i, e) {
+    if (!onDelete) return;
+    const ok = window.confirm(`"${e.naam}" verwijderen?`);
+    if (ok) onDelete(i);
+  }
+  return (
+    <div className="space-y-2">
+      {entries.map((e, i) => (
+        <div key={i} className="bg-white rounded-lg p-3 shadow-sm flex justify-between items-start gap-2 group">
+          <div className="flex-1 min-w-0">
+            <div className="font-medium text-slate-800 text-sm">{e.naam}</div>
+            <div className="text-xs text-slate-500">{e.hoeveelheid}</div>
+          </div>
+          <div className="text-right text-xs text-slate-600 tabular-nums whitespace-nowrap">
+            <div>{Math.round(e.kcal || 0)} kcal</div>
+            <div className="text-slate-400">E {Math.round(e.eiwit_g || 0)}g · K {Math.round(e.koolhydraten_g || 0)}g · V {Math.round(e.vet_g || 0)}g</div>
+          </div>
+          {onDelete && (
+            <button
+              onClick={() => handleDelete(i, e)}
+              aria-label={`Verwijder ${e.naam}`}
+              title="Verwijderen"
+              className="shrink-0 w-6 h-6 rounded-full text-slate-400 hover:bg-red-100 hover:text-red-600 flex items-center justify-center text-sm leading-none"
+            >×</button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ChatView({ day, onNewEntries, onMessage, targets, profile, history, setHistory, anthropicKey }) {
+  const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState(null);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [history, sending]);
+
+  async function send() {
+    if (!input.trim() || sending) return;
+    if (!anthropicKey) { setError('Vul eerst je Anthropic API key in via Instellingen.'); return; }
+    const userText = input.trim();
+    setInput('');
+    setError(null);
+
+    const newHistory = [...history, { role: 'user', content: userText, ts: Date.now() }];
+    setHistory(newHistory);
+    setSending(true);
+
+    try {
+      // Context voor Claude
+      const todayEntries = (day?.entries || []).map(e =>
+        `- ${e.naam} (${e.hoeveelheid}) — ${Math.round(e.kcal)} kcal`
+      ).join('\n');
+
+      const contextMsg = `Profiel: ${profile.gender === 'v' ? 'vrouw' : 'man'}, ${profile.age} jr, ${profile.weightKg} kg.
+Dagdoelen: ${targets.kcal} kcal · ${targets.eiwit_g} g eiwit · ${targets.vezels_g} g vezels.
+Al geregistreerd vandaag (${formatDateNL(todayISO())}):
+${todayEntries || '(nog niks)'}
+
+Nieuwe input van gebruiker:
+${userText}`;
+
+      // Bouw messages voor Claude (alleen laatste paar user/assistant)
+      const claudeMessages = [];
+      const tail = newHistory.slice(-8);
+      for (const m of tail) {
+        if (m.role === 'user' && m === tail[tail.length - 1]) {
+          claudeMessages.push({ role: 'user', content: contextMsg });
+        } else {
+          claudeMessages.push({ role: m.role, content: m.content });
+        }
+      }
+
+      const responseText = await callClaude({
+        apiKey: anthropicKey,
+        system: SYSTEM_PROMPT_BASE,
+        messages: claudeMessages,
+      });
+
+      const mealData = extractMealData(responseText);
+      // Prefer the conversational reply from inside the JSON.
+      // Fall back to any text outside the block (stripped) if parsing failed.
+      const visibleReply =
+        (mealData && mealData.reply && String(mealData.reply).trim())
+        || stripMealData(responseText)
+        || 'Geregistreerd.';
+
+      const assistantMsg = { role: 'assistant', content: visibleReply, ts: Date.now(), mealData };
+      const after = [...newHistory, assistantMsg];
+      setHistory(after);
+      onMessage(after);
+
+      if (mealData && mealData.status === 'complete' && Array.isArray(mealData.items) && mealData.items.length) {
+        onNewEntries(mealData.items);
+      }
+    } catch (e) {
+      console.error(e);
+      setError(e.message);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-3">
+        {history.length === 0 && (
+          <div className="text-center text-slate-500 text-sm mt-8">
+            <p className="mb-2">👋 Vertel me wat je vandaag hebt gegeten of gedronken.</p>
+            <p className="text-xs">Bv. "boterham met kaas, 8 wafels waarvan 3 met kaas, en een bakje yoghurt"</p>
+          </div>
+        )}
+        {history.map((m, i) => (
+          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`chat-bubble max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ${
+              m.role === 'user'
+                ? 'bg-emerald-600 text-white rounded-br-sm'
+                : 'bg-white text-slate-800 rounded-bl-sm shadow-sm'
+            }`}>
+              {m.content}
+              {m.mealData && m.mealData.items && m.mealData.items.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-slate-200 text-xs text-slate-500">
+                  ✓ {m.mealData.items.length} {m.mealData.items.length === 1 ? 'item' : 'items'} toegevoegd aan je dagtotalen
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+        {sending && (
+          <div className="flex justify-start">
+            <div className="bg-white text-slate-500 rounded-2xl px-4 py-2.5 text-sm shadow-sm">
+              <span className="inline-block animate-pulse">Claude denkt na…</span>
+            </div>
+          </div>
+        )}
+        {error && (
+          <div className="bg-red-50 text-red-700 text-xs rounded-lg p-2">{error}</div>
+        )}
+      </div>
+      <div className="border-t bg-white p-3">
+        <div className="flex gap-2">
+          <textarea
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+            }}
+            rows={2}
+            placeholder="Typ wat je gegeten hebt…"
+            className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none"
+          />
+          <button
+            onClick={send}
+            disabled={sending || !input.trim()}
+            className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-lg px-4 py-2 text-sm font-medium"
+          >
+            Stuur
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CalendarView({ fb, uid, targets, onSelectDate }) {
+  const [cursor, setCursor] = useState(() => {
+    const d = new Date();
+    return { y: d.getFullYear(), m: d.getMonth() };
+  });
+  const [days, setDays] = useState({});
+  const [loading, setLoading] = useState(false);
+
+  const yyyymm = `${cursor.y}-${String(cursor.m + 1).padStart(2, '0')}`;
+
+  useEffect(() => {
+    if (!fb || !uid) return;
+    setLoading(true);
+    loadMonth(fb, uid, yyyymm).then(data => {
+      setDays(data);
+      setLoading(false);
+    });
+  }, [fb, uid, yyyymm]);
+
+  const firstOfMonth = new Date(cursor.y, cursor.m, 1);
+  const daysInMonth = new Date(cursor.y, cursor.m + 1, 0).getDate();
+  // Maandag = 0
+  const startDow = (firstOfMonth.getDay() + 6) % 7;
+
+  const cells = [];
+  for (let i = 0; i < startDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) {
+    const iso = `${cursor.y}-${String(cursor.m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    cells.push({ d, iso });
+  }
+
+  function prev() {
+    setCursor(c => c.m === 0 ? { y: c.y - 1, m: 11 } : { y: c.y, m: c.m - 1 });
+  }
+  function next() {
+    setCursor(c => c.m === 11 ? { y: c.y + 1, m: 0 } : { y: c.y, m: c.m + 1 });
+  }
+
+  const monthLabel = new Date(cursor.y, cursor.m, 1).toLocaleDateString('nl-NL', { month: 'long', year: 'numeric' });
+
+  return (
+    <div className="p-4">
+      <div className="flex justify-between items-center mb-4">
+        <button onClick={prev} className="px-3 py-1 rounded hover:bg-slate-200">←</button>
+        <h2 className="text-lg font-semibold capitalize">{monthLabel}</h2>
+        <button onClick={next} className="px-3 py-1 rounded hover:bg-slate-200">→</button>
+      </div>
+      <div className="grid grid-cols-7 gap-1 text-xs text-slate-500 mb-1">
+        {['Ma','Di','Wo','Do','Vr','Za','Zo'].map(d => (
+          <div key={d} className="text-center font-medium">{d}</div>
+        ))}
+      </div>
+      <div className="grid grid-cols-7 gap-1">
+        {cells.map((c, i) => {
+          if (!c) return <div key={i} />;
+          const day = days[c.iso];
+          const totals = day ? sumEntries(day.entries) : null;
+          const kcalPct = totals ? Math.min(100, Math.round((totals.kcal / targets.kcal) * 100)) : 0;
+          const isToday = c.iso === todayISO();
+          return (
+            <button
+              key={i}
+              onClick={() => onSelectDate(c.iso)}
+              className={`aspect-square rounded-lg p-1 flex flex-col items-center justify-start text-xs hover:bg-emerald-50 transition ${
+                isToday ? 'ring-2 ring-emerald-500' : 'bg-white shadow-sm'
+              }`}
+            >
+              <div className="font-medium text-slate-700">{c.d}</div>
+              {totals && (
+                <>
+                  <div className="text-[10px] text-slate-500 mt-0.5 tabular-nums">{Math.round(totals.kcal)}</div>
+                  <div className="w-full h-1 bg-slate-200 rounded mt-auto overflow-hidden">
+                    <div
+                      className={`h-full ${kcalPct > 110 ? 'bg-red-400' : kcalPct < 60 ? 'bg-amber-400' : 'bg-emerald-500'}`}
+                      style={{ width: `${Math.min(kcalPct, 100)}%` }}
+                    />
+                  </div>
+                </>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      {loading && <div className="text-xs text-slate-400 text-center mt-3">Laden…</div>}
+    </div>
+  );
+}
+
+function DayDetail({ date, day, targets, onClose, onAnalyze, anthropicKey, profile, loading, error, onDelete }) {
+  const [analysis, setAnalysis] = useState('');
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [q, setQ] = useState('');
+  const [analysisErr, setAnalysisErr] = useState(null);
+
+  async function ask(question) {
+    if (!anthropicKey) { setAnalysisErr('Vul eerst je API key in.'); return; }
+    setAnalysisLoading(true); setAnalysisErr(null);
+    try {
+      const totals = sumEntries(day?.entries || []);
+      const context = `Datum: ${formatDateNL(date)}
+Dagdoelen: ${JSON.stringify(targets)}
+Werkelijk vandaag: ${JSON.stringify(totals)}
+Items vandaag:
+${(day?.entries || []).map(e => `- ${e.naam} (${e.hoeveelheid}) ${Math.round(e.kcal)} kcal`).join('\n')}
+
+Vraag: ${question}`;
+      const text = await callClaude({
+        apiKey: anthropicKey,
+        system: ANALYSIS_SYSTEM,
+        messages: [{ role: 'user', content: context }],
+      });
+      setAnalysis(text);
+    } catch (e) { setAnalysisErr(e.message); }
+    finally { setAnalysisLoading(false); }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-slate-50 w-full sm:max-w-2xl sm:rounded-2xl max-h-[95vh] overflow-y-auto">
+        <div className="sticky top-0 bg-white border-b px-4 py-3 flex justify-between items-center">
+          <h2 className="font-semibold capitalize">{formatDateNL(date)}</h2>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-800 text-xl">×</button>
+        </div>
+        <div className="p-4 space-y-4">
+          {loading && (
+            <div className="bg-white rounded-xl p-4 shadow-sm text-sm text-slate-500">
+              Dag laden…
+            </div>
+          )}
+          {error && !loading && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+              <div className="font-medium mb-1">Kon de dag niet laden</div>
+              <div className="text-xs">{error}</div>
+              <div className="text-xs mt-2 text-red-600">Check je Firestore-rules en of Anonymous auth aan staat.</div>
+            </div>
+          )}
+          <DaySummary day={day} targets={targets} />
+          <div>
+            <h3 className="font-semibold text-slate-800 mb-2">
+              Items {day?.entries?.length ? `(${day.entries.length})` : ''}
+            </h3>
+            <EntriesList entries={day?.entries || []} onDelete={onDelete} />
+          </div>
+          <div className="bg-white rounded-xl p-4 shadow-sm">
+            <h3 className="font-semibold text-slate-800 mb-2">Vraag analyse</h3>
+            <div className="flex flex-wrap gap-2 mb-3">
+              <button onClick={() => ask('Geef een korte analyse van deze dag.')} className="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-full px-3 py-1">Analyse van deze dag</button>
+              <button onClick={() => ask('Hoe ziet de balans koolhydraten/eiwit/vet eruit?')} className="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-full px-3 py-1">Macro-balans</button>
+              <button onClick={() => ask('Zijn er opvallende tekorten aan micronutriënten?')} className="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-full px-3 py-1">Tekorten?</button>
+            </div>
+            <div className="flex gap-2">
+              <input
+                value={q}
+                onChange={e => setQ(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && q.trim()) { ask(q); setQ(''); } }}
+                placeholder="Stel een eigen vraag…"
+                className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+              />
+              <button
+                onClick={() => { if (q.trim()) { ask(q); setQ(''); } }}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-3 text-sm"
+              >Vraag</button>
+            </div>
+            {analysisLoading && <div className="text-xs text-slate-400 mt-2">Bezig…</div>}
+            {analysisErr && <div className="text-xs text-red-600 mt-2">{analysisErr}</div>}
+            {analysis && (
+              <div className="mt-3 bg-slate-50 rounded-lg p-3 text-sm text-slate-700 whitespace-pre-wrap">
+                {analysis}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WeekAnalysis({ fb, uid, targets, anthropicKey }) {
+  const [result, setResult] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+  const [range, setRange] = useState('7');
+
+  async function run(customQ) {
+    if (!anthropicKey) { setErr('Vul eerst je API key in.'); return; }
+    setLoading(true); setErr(null);
+    try {
+      const n = parseInt(range, 10);
+      const rows = [];
+      for (let i = 0; i < n; i++) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        const iso = d.toISOString().slice(0, 10);
+        const day = await loadDay(fb, uid, iso);
+        if (day) {
+          const t = sumEntries(day.entries);
+          rows.push({ datum: iso, ...t });
+        }
+      }
+      if (rows.length === 0) { setResult('Nog geen data in deze periode.'); setLoading(false); return; }
+      const context = `Dagdoelen: ${JSON.stringify(targets)}
+
+Geregistreerde dagen (laatste ${n} dagen):
+${rows.map(r => JSON.stringify(r)).join('\n')}
+
+${customQ || `Geef een analyse over deze periode: gemiddeldes, trends, sterke en zwakke punten, en 2 concrete verbeterpunten.`}`;
+      const text = await callClaude({
+        apiKey: anthropicKey,
+        system: ANALYSIS_SYSTEM,
+        messages: [{ role: 'user', content: context }],
+        max_tokens: 2000,
+      });
+      setResult(text);
+    } catch (e) { setErr(e.message); }
+    finally { setLoading(false); }
+  }
+
+  return (
+    <div className="p-4 space-y-3">
+      <div className="bg-white rounded-xl p-4 shadow-sm">
+        <h2 className="font-semibold text-slate-800 mb-3">Periode-analyse</h2>
+        <div className="flex items-center gap-2 mb-3">
+          <label className="text-sm text-slate-600">Periode:</label>
+          <select value={range} onChange={e => setRange(e.target.value)} className="border rounded px-2 py-1 text-sm">
+            <option value="7">7 dagen</option>
+            <option value="14">14 dagen</option>
+            <option value="30">30 dagen</option>
+          </select>
+          <button onClick={() => run()} className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-3 py-1 text-sm">
+            Maak analyse
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => run('Hoe is mijn eiwitinname deze week?')} className="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-full px-3 py-1">Eiwit deze week</button>
+          <button onClick={() => run('Drink ik genoeg water en zijn er patronen?')} className="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-full px-3 py-1">Water & patronen</button>
+          <button onClick={() => run('Op welke dagen zat ik ruim onder mijn caloriedoel?')} className="text-xs bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-full px-3 py-1">Lage dagen</button>
+        </div>
+        {loading && <div className="text-xs text-slate-400 mt-3">Bezig…</div>}
+        {err && <div className="text-xs text-red-600 mt-2">{err}</div>}
+        {result && (
+          <div className="mt-4 bg-slate-50 rounded-lg p-3 text-sm text-slate-700 whitespace-pre-wrap">
+            {result}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseConfig, profile, setProfile, fbStatus, fb, uid }) {
+  const [rawFb, setRawFb] = useState(() => firebaseConfig ? JSON.stringify(firebaseConfig, null, 2) : '');
+  const [fbErr, setFbErr] = useState(null);
+  const [testResult, setTestResult] = useState(null);
+  const [testing, setTesting] = useState(false);
+
+  async function testFirebase() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      if (!fb || !uid) throw new Error('Firebase is nog niet verbonden (uid ontbreekt). Wacht even of check Anonymous auth.');
+      const F = fb.F;
+      const testId = '_diagnostic_' + Date.now();
+      const ref = F.doc(fb.db, 'users', uid, 'days', testId);
+      await F.setDoc(ref, { test: true, at: F.serverTimestamp() }, { merge: true });
+      const snap = await F.getDoc(ref);
+      if (!snap.exists()) throw new Error('Schrijven lijkt gelukt maar lezen geeft geen document terug.');
+      setTestResult({ ok: true, msg: `Gelukt. Firebase werkt correct.\n(Doc geschreven en gelezen onder users/${uid}/days/${testId}.)` });
+    } catch (e) {
+      let msg = e.message || String(e);
+      if (/permission|PERMISSION_DENIED/i.test(msg)) {
+        msg += '\n\n→ Je Firestore-rules blokkeren deze write. Vervang de rules met de versie uit de README (match /users/{uid}/{document=**} met auth-check).';
+      } else if (/auth/i.test(msg) && /anonymous/i.test(msg)) {
+        msg += '\n\n→ Zet Anonymous sign-in aan in Firebase → Authentication → Sign-in method.';
+      }
+      setTestResult({ ok: false, msg });
+    } finally { setTesting(false); }
+  }
+
+  function saveFb() {
+    // Tolerant parse: accept both strict JSON and Firebase-style JS object
+    // (unquoted keys, single quotes, trailing commas, "const firebaseConfig =" prefix).
+    function tolerantParse(s) {
+      const trimmed = s.trim();
+      if (!trimmed) throw new Error('leeg');
+      try { return JSON.parse(trimmed); } catch (_) {}
+      const fixed = trimmed
+        .replace(/^\s*(?:const|let|var)\s+\w+\s*=\s*/, '')  // strip "const firebaseConfig ="
+        .replace(/;\s*$/, '')                                // strip trailing ;
+        .replace(/\/\/.*$/gm, '')                            // strip // comments
+        .replace(/\/\*[\s\S]*?\*\//g, '')                    // strip /* */ comments
+        .replace(/([\{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":')  // quote bare keys
+        .replace(/'/g, '"')                                   // single -> double quotes
+        .replace(/,(\s*[\}\]])/g, '$1');                      // trailing commas
+      return JSON.parse(fixed);
+    }
+    try {
+      const parsed = tolerantParse(rawFb);
+      if (!parsed || !parsed.apiKey || !parsed.projectId) {
+        throw new Error('mist apiKey of projectId');
+      }
+      setFirebaseConfig(parsed);
+      setFbErr(null);
+    } catch (e) {
+      setFbErr('Kon config niet lezen: ' + e.message);
+    }
+  }
+
+  return (
+    <div className="p-4 space-y-4 max-w-2xl mx-auto">
+      <div className="bg-white rounded-xl p-4 shadow-sm">
+        <h2 className="font-semibold text-slate-800 mb-3">Jouw profiel</h2>
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <label className="block">
+            <span className="text-slate-600">Naam</span>
+            <input value={profile.name} onChange={e => setProfile({ ...profile, name: e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
+          </label>
+          <label className="block">
+            <span className="text-slate-600">Geslacht</span>
+            <select value={profile.gender} onChange={e => setProfile({ ...profile, gender: e.target.value })} className="w-full border rounded px-2 py-1 mt-1">
+              <option value="v">Vrouw</option>
+              <option value="m">Man</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-slate-600">Leeftijd</span>
+            <input type="number" value={profile.age} onChange={e => setProfile({ ...profile, age: +e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
+          </label>
+          <label className="block">
+            <span className="text-slate-600">Gewicht (kg)</span>
+            <input type="number" value={profile.weightKg} onChange={e => setProfile({ ...profile, weightKg: +e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
+          </label>
+          <label className="block">
+            <span className="text-slate-600">Lengte (cm)</span>
+            <input type="number" value={profile.heightCm} onChange={e => setProfile({ ...profile, heightCm: +e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
+          </label>
+          <label className="block">
+            <span className="text-slate-600">Beweging</span>
+            <select value={profile.activity} onChange={e => setProfile({ ...profile, activity: e.target.value })} className="w-full border rounded px-2 py-1 mt-1">
+              <option value="laag">Laag (zittend)</option>
+              <option value="matig">Matig</option>
+              <option value="hoog">Hoog</option>
+            </select>
+          </label>
+          <label className="block col-span-2">
+            <span className="text-slate-600">Doel</span>
+            <select value={profile.goal} onChange={e => setProfile({ ...profile, goal: e.target.value })} className="w-full border rounded px-2 py-1 mt-1">
+              <option value="afvallen">Afvallen</option>
+              <option value="onderhoud">Onderhoud</option>
+              <option value="aankomen">Aankomen</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl p-4 shadow-sm">
+        <h2 className="font-semibold text-slate-800 mb-3">Anthropic API key</h2>
+        <p className="text-xs text-slate-500 mb-2">Nodig voor de chat. Key wordt lokaal in je browser opgeslagen (localStorage). Haal een key via console.anthropic.com.</p>
+        <input
+          type="password"
+          value={anthropicKey || ''}
+          onChange={e => setAnthropicKey(e.target.value)}
+          placeholder="sk-ant-…"
+          className="w-full border rounded px-2 py-1 font-mono text-sm"
+        />
+      </div>
+
+      <div className="bg-white rounded-xl p-4 shadow-sm">
+        <h2 className="font-semibold text-slate-800 mb-2">Firebase config</h2>
+        <p className="text-xs text-slate-500 mb-2">
+          Plak de <code>firebaseConfig</code> JSON uit je Firebase-project-instellingen (Project settings → General → Your apps → Web app → SDK setup → Config).
+          Zet ook <b>Anonymous auth</b> en <b>Firestore</b> aan in je Firebase-project.
+        </p>
+        <textarea
+          rows={8}
+          value={rawFb}
+          onChange={e => setRawFb(e.target.value)}
+          placeholder={`{\n  "apiKey": "...",\n  "authDomain": "…firebaseapp.com",\n  "projectId": "…",\n  "storageBucket": "…",\n  "messagingSenderId": "…",\n  "appId": "…"\n}`}
+          className="w-full border rounded px-2 py-1 font-mono text-xs"
+        />
+        <div className="flex items-center gap-2 mt-2 flex-wrap">
+          <button onClick={saveFb} className="bg-emerald-600 hover:bg-emerald-700 text-white rounded px-3 py-1 text-sm">Opslaan</button>
+          <button
+            onClick={testFirebase}
+            disabled={testing || !fb || !uid}
+            className="bg-slate-700 hover:bg-slate-800 disabled:bg-slate-300 text-white rounded px-3 py-1 text-sm"
+          >
+            {testing ? 'Testen…' : 'Test verbinding'}
+          </button>
+          {fbErr && <span className="text-xs text-red-600">{fbErr}</span>}
+          <span className={`text-xs ml-auto ${fbStatus === 'connected' ? 'text-emerald-600' : 'text-slate-500'}`}>
+            Status: {fbStatus}
+          </span>
+        </div>
+        {testResult && (
+          <div className={`mt-3 rounded-lg p-3 text-xs whitespace-pre-wrap ${testResult.ok ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
+            <div className="font-semibold mb-1">{testResult.ok ? '✓ Test gelukt' : '✗ Test mislukt'}</div>
+            {testResult.msg}
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white rounded-xl p-4 shadow-sm text-xs text-slate-500 leading-relaxed">
+        <p className="font-semibold text-slate-700 mb-1">Over voedingswaarden</p>
+        <p>De voedingswaarden worden door Claude geschat op basis van kennis van Nederlandse voedingsmiddelen en portiegroottes (NEVO-stijl). Voor echte klinische nauwkeurigheid zou je de NEVO-database van RIVM moeten integreren — die staat niet als open API online en vereist een download.</p>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   MAIN APP
+   ============================================================ */
+function App() {
+  const [anthropicKey, setAnthropicKeyState] = useState(() => localStorage.getItem(LS_KEYS.anthropicKey) || '');
+  const [firebaseConfig, setFirebaseConfigState] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(LS_KEYS.firebaseConfig) || 'null'); }
+    catch { return null; }
+  });
+  const [profile, setProfileState] = useState(() => {
+    try { return { ...DEFAULT_PROFILE, ...(JSON.parse(localStorage.getItem(LS_KEYS.profile) || '{}')) }; }
+    catch { return DEFAULT_PROFILE; }
+  });
+
+  const setAnthropicKey = (v) => { setAnthropicKeyState(v); localStorage.setItem(LS_KEYS.anthropicKey, v); };
+  const setFirebaseConfig = (v) => { setFirebaseConfigState(v); localStorage.setItem(LS_KEYS.firebaseConfig, JSON.stringify(v)); };
+  const setProfile = (v) => { setProfileState(v); localStorage.setItem(LS_KEYS.profile, JSON.stringify(v)); };
+
+  const targets = useMemo(() => calcDailyTargets(profile), [profile]);
+  const { fb, uid, error: fbError, phase: fbPhase } = useFirebase(firebaseConfig);
+  const [saveError, setSaveError] = useState(null);
+
+  const [view, setView] = useState('chat'); // chat | calendar | week | settings
+  const [today, setToday] = useState(null); // { entries: [], messages: [] }
+  const [history, setHistory] = useState([]);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [selectedDay, setSelectedDay] = useState(null);
+
+  // Load today on mount / when firebase ready
+  useEffect(() => {
+    if (!fb || !uid) return;
+    loadDay(fb, uid, todayISO()).then(d => {
+      setToday(d || { entries: [], messages: [] });
+      setHistory((d && d.messages) || []);
+    });
+  }, [fb, uid]);
+
+  // Select another date
+  const [selectedDayLoading, setSelectedDayLoading] = useState(false);
+  const [selectedDayError, setSelectedDayError] = useState(null);
+  useEffect(() => {
+    if (!selectedDate) { setSelectedDay(null); setSelectedDayError(null); return; }
+    // For today, use the already-loaded `today` state so it stays in sync
+    // with entries added through the chat and we avoid an extra round-trip.
+    if (selectedDate === todayISO()) {
+      setSelectedDay(today || { entries: [] });
+      setSelectedDayError(null);
+      return;
+    }
+    if (!fb || !uid) return;
+    setSelectedDayLoading(true);
+    setSelectedDayError(null);
+    loadDay(fb, uid, selectedDate)
+      .then(d => { setSelectedDay(d || { entries: [] }); setSelectedDayLoading(false); })
+      .catch(e => {
+        console.error('loadDay failed', e);
+        setSelectedDay({ entries: [] });
+        setSelectedDayError(e.message || String(e));
+        setSelectedDayLoading(false);
+      });
+  }, [fb, uid, selectedDate, today]);
+
+  async function handleNewEntries(items) {
+    const newEntries = [...(today?.entries || []), ...items.map(i => ({ ...i, ts: Date.now() }))];
+    setToday({ ...(today || {}), entries: newEntries });
+    if (!fb || !uid) {
+      setSaveError('Niet opgeslagen: Firebase is niet verbonden. Open ⚙ Instellingen voor details.');
+      return;
+    }
+    try {
+      await saveDay(fb, uid, todayISO(), { entries: newEntries });
+      setSaveError(null);
+    } catch (e) {
+      console.error('saveDay failed', e);
+      setSaveError('Opslaan mislukt: ' + (e.message || String(e)));
+    }
+  }
+  async function handleDeleteEntry(date, index) {
+    const isToday = date === todayISO();
+    const source = isToday ? today : selectedDay;
+    if (!source || !Array.isArray(source.entries)) return;
+    const newEntries = source.entries.filter((_, i) => i !== index);
+    if (isToday) {
+      setToday({ ...(today || {}), entries: newEntries });
+    }
+    if (selectedDate === date) {
+      setSelectedDay({ ...(selectedDay || {}), entries: newEntries });
+    }
+    if (!fb || !uid) {
+      setSaveError('Niet opgeslagen: Firebase is niet verbonden.');
+      return;
+    }
+    try {
+      await saveDay(fb, uid, date, { entries: newEntries });
+      setSaveError(null);
+    } catch (e) {
+      console.error('saveDay failed', e);
+      setSaveError('Opslaan mislukt: ' + (e.message || String(e)));
+    }
+  }
+  async function handleMessages(msgs) {
+    if (!fb || !uid) return;
+    await saveDay(fb, uid, todayISO(), { messages: msgs });
+  }
+
+  const fbStatus = !firebaseConfig
+    ? 'niet geconfigureerd'
+    : fbError
+      ? `fout: ${fbError}`
+      : uid
+        ? 'connected'
+        : `verbinden… (${fbPhase})`;
+  const needsConfig = !firebaseConfig || !anthropicKey;
+
+  return (
+    <div className="flex flex-col h-screen max-w-3xl mx-auto bg-slate-100">
+      <header className="bg-white border-b px-4 py-3 flex items-center justify-between">
+        <div>
+          <h1 className="font-bold text-slate-800">🥗 Maaltijd Tracker</h1>
+          <div className="text-xs text-slate-500 capitalize">{formatDateNL(todayISO())}</div>
+        </div>
+        <nav className="flex gap-1 text-sm">
+          <button onClick={() => setView('chat')} className={`px-3 py-1.5 rounded-lg ${view==='chat'?'bg-emerald-600 text-white':'hover:bg-slate-200'}`}>Chat</button>
+          <button onClick={() => setView('calendar')} className={`px-3 py-1.5 rounded-lg ${view==='calendar'?'bg-emerald-600 text-white':'hover:bg-slate-200'}`}>Kalender</button>
+          <button onClick={() => setView('week')} className={`px-3 py-1.5 rounded-lg ${view==='week'?'bg-emerald-600 text-white':'hover:bg-slate-200'}`}>Analyse</button>
+          <button onClick={() => setView('settings')} className={`px-3 py-1.5 rounded-lg ${view==='settings'?'bg-emerald-600 text-white':'hover:bg-slate-200'}`}>⚙</button>
+        </nav>
+      </header>
+
+      {needsConfig && view !== 'settings' && (
+        <div className="bg-amber-100 text-amber-800 text-sm px-4 py-2 border-b border-amber-200">
+          ⚠ Configuratie incompleet. <button onClick={() => setView('settings')} className="underline font-medium">Open instellingen</button>
+        </div>
+      )}
+
+      {firebaseConfig && !uid && fbPhase !== 'ready' && view !== 'settings' && (
+        <div className={`text-sm px-4 py-2 border-b ${fbPhase === 'error' ? 'bg-red-100 text-red-800 border-red-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
+          {fbPhase === 'error' ? '🛑' : '⏳'} Firebase: {fbPhase === 'loading-sdk' ? 'SDK laden…' : fbPhase === 'init' ? 'initialiseren…' : fbPhase === 'signing-in' ? 'inloggen…' : fbPhase === 'error' ? (fbError || 'fout') : fbPhase}
+          {fbPhase === 'error' && <button onClick={() => setView('settings')} className="ml-2 underline font-medium">Naar instellingen</button>}
+        </div>
+      )}
+
+      {saveError && (
+        <div className="bg-red-100 text-red-800 text-sm px-4 py-2 border-b border-red-200 flex items-start justify-between gap-3">
+          <div>🛑 {saveError}</div>
+          <button onClick={() => setSaveError(null)} className="text-red-600 hover:text-red-900 font-bold">×</button>
+        </div>
+      )}
+
+      <main className="flex-1 overflow-hidden flex flex-col">
+        {view === 'chat' && (
+          <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+            <div className="flex-1 flex flex-col overflow-hidden">
+              <ChatView
+                day={today}
+                onNewEntries={handleNewEntries}
+                onMessage={handleMessages}
+                targets={targets}
+                profile={profile}
+                history={history}
+                setHistory={setHistory}
+                anthropicKey={anthropicKey}
+              />
+            </div>
+            <aside className="md:w-80 border-t md:border-t-0 md:border-l bg-slate-50 overflow-y-auto scrollbar-thin p-3 space-y-3">
+              <DaySummary day={today} targets={targets} />
+              <div>
+                <h3 className="font-semibold text-slate-800 mb-2 text-sm">Items vandaag</h3>
+                <EntriesList
+                  entries={today?.entries}
+                  onDelete={(i) => handleDeleteEntry(todayISO(), i)}
+                />
+              </div>
+            </aside>
+          </div>
+        )}
+
+        {view === 'calendar' && fb && uid && (
+          <CalendarView
+            fb={fb}
+            uid={uid}
+            targets={targets}
+            onSelectDate={setSelectedDate}
+          />
+        )}
+
+        {view === 'week' && fb && uid && (
+          <WeekAnalysis fb={fb} uid={uid} targets={targets} anthropicKey={anthropicKey} />
+        )}
+
+        {view === 'settings' && (
+          <Settings
+            anthropicKey={anthropicKey}
+            setAnthropicKey={setAnthropicKey}
+            firebaseConfig={firebaseConfig}
+            setFirebaseConfig={setFirebaseConfig}
+            profile={profile}
+            setProfile={setProfile}
+            fbStatus={fbStatus}
+            fb={fb}
+            uid={uid}
+          />
+        )}
+      </main>
+
+      {selectedDate && (
+        <DayDetail
+          date={selectedDate}
+          day={selectedDay}
+          targets={targets}
+          onClose={() => setSelectedDate(null)}
+          anthropicKey={anthropicKey}
+          profile={profile}
+          loading={selectedDayLoading}
+          error={selectedDayError}
+          onDelete={(i) => handleDeleteEntry(selectedDate, i)}
+        />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
