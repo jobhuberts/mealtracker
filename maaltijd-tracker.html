@@ -15,11 +15,11 @@
     getAuth, signInAnonymously, onAuthStateChanged
   } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
   import {
-    getFirestore, doc, setDoc, getDoc, collection, getDocs, query, where, orderBy, onSnapshot, updateDoc, arrayUnion, serverTimestamp
+    getFirestore, doc, setDoc, getDoc, deleteDoc, collection, getDocs, query, where, orderBy, onSnapshot, updateDoc, arrayUnion, serverTimestamp
   } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
   window._firebase = {
     initializeApp, getAuth, signInAnonymously, onAuthStateChanged,
-    getFirestore, doc, setDoc, getDoc, collection, getDocs, query, where, orderBy, onSnapshot, updateDoc, arrayUnion, serverTimestamp
+    getFirestore, doc, setDoc, getDoc, deleteDoc, collection, getDocs, query, where, orderBy, onSnapshot, updateDoc, arrayUnion, serverTimestamp
   };
   window.dispatchEvent(new Event('firebase-ready'));
 </script>
@@ -43,13 +43,16 @@ const { useState, useEffect, useRef, useMemo, useCallback } = React;
 const LS_KEYS = {
   anthropicKey: 'mt_anthropic_key',
   firebaseConfig: 'mt_firebase_config',
-  profile: 'mt_profile',
+  activeProfileId: 'mt_active_profile_id',
 };
+
+const EMOJI_ICONS = ['🦊','🐼','🦁','🐨','🐸','🦉','🐙','🦄','🐯','🐵','🐧','🐰','🦒','🐻','🐳','🦩','🐝','🐢','🦕','🐱','🐶','🐷','🦔','🐔','🦖','🦚','🐲','🐻‍❄️'];
 
 const DEFAULT_PROFILE = {
   name: '',
   gender: 'v',           // 'v' of 'm'
   age: 30,
+  icon: '🦊',
   weightKg: 70,
   heightCm: 170,
   activity: 'matig',     // laag | matig | hoog
@@ -300,28 +303,97 @@ function useFirebase(config) {
   return { fb, uid, error, phase };
 }
 
-async function saveDay(fb, uid, date, dayData) {
+async function saveDay(fb, profileId, date, dayData) {
   const F = fb.F;
-  const ref = F.doc(fb.db, 'users', uid, 'days', date);
+  const ref = F.doc(fb.db, 'profiles', profileId, 'days', date);
   await F.setDoc(ref, { ...dayData, updatedAt: F.serverTimestamp() }, { merge: true });
 }
 
-async function loadDay(fb, uid, date) {
+async function loadDay(fb, profileId, date) {
   const F = fb.F;
-  const ref = F.doc(fb.db, 'users', uid, 'days', date);
+  const ref = F.doc(fb.db, 'profiles', profileId, 'days', date);
   const snap = await F.getDoc(ref);
   return snap.exists() ? snap.data() : null;
 }
 
-async function loadMonth(fb, uid, yyyymm) {
+async function loadMonth(fb, profileId, yyyymm) {
   const F = fb.F;
-  const colRef = F.collection(fb.db, 'users', uid, 'days');
+  const colRef = F.collection(fb.db, 'profiles', profileId, 'days');
   const snap = await F.getDocs(colRef);
   const out = {};
   snap.forEach(d => {
     if (d.id.startsWith(yyyymm)) out[d.id] = d.data();
   });
   return out;
+}
+
+/* ----- Profiles CRUD ----- */
+async function loadProfiles(fb) {
+  const F = fb.F;
+  const colRef = F.collection(fb.db, 'profiles');
+  const snap = await F.getDocs(colRef);
+  const out = [];
+  snap.forEach(d => out.push({ id: d.id, ...d.data() }));
+  out.sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
+  return out;
+}
+
+async function createProfile(fb, uid, data) {
+  const F = fb.F;
+  const id = 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  const ref = F.doc(fb.db, 'profiles', id);
+  await F.setDoc(ref, {
+    ...data,
+    createdAt: F.serverTimestamp(),
+    updatedAt: F.serverTimestamp(),
+    createdByUid: uid || null,
+  });
+  return id;
+}
+
+async function updateProfile(fb, profileId, data) {
+  const F = fb.F;
+  const ref = F.doc(fb.db, 'profiles', profileId);
+  await F.setDoc(ref, { ...data, updatedAt: F.serverTimestamp() }, { merge: true });
+}
+
+async function deleteProfile(fb, profileId) {
+  const F = fb.F;
+  // Delete all days in the subcollection
+  const daysRef = F.collection(fb.db, 'profiles', profileId, 'days');
+  const snap = await F.getDocs(daysRef);
+  await Promise.all(
+    snap.docs.map(d => F.deleteDoc(F.doc(fb.db, 'profiles', profileId, 'days', d.id)))
+  );
+  // Delete the profile document itself
+  await F.deleteDoc(F.doc(fb.db, 'profiles', profileId));
+}
+
+async function migrateLegacyDays(fb, uid, profileId) {
+  // Copies all days from users/{uid}/days/ → profiles/{profileId}/days/
+  const F = fb.F;
+  const srcCol = F.collection(fb.db, 'users', uid, 'days');
+  const snap = await F.getDocs(srcCol);
+  let count = 0;
+  for (const d of snap.docs) {
+    if (d.id.startsWith('_diagnostic_') || d.id === '_diagnostic_') continue;
+    const data = d.data();
+    const dstRef = F.doc(fb.db, 'profiles', profileId, 'days', d.id);
+    await F.setDoc(dstRef, { ...data, migratedFromUid: uid, updatedAt: F.serverTimestamp() }, { merge: true });
+    count++;
+  }
+  return count;
+}
+
+async function hasLegacyData(fb, uid) {
+  const F = fb.F;
+  const srcCol = F.collection(fb.db, 'users', uid, 'days');
+  try {
+    const snap = await F.getDocs(srcCol);
+    let n = 0;
+    snap.forEach(d => { if (!d.id.startsWith('_diagnostic_')) n++; });
+    return n;
+  } catch (_) { return 0; }
 }
 
 /* ============================================================
@@ -560,7 +632,7 @@ ${userText}`;
   );
 }
 
-function CalendarView({ fb, uid, targets, onSelectDate }) {
+function CalendarView({ fb, profileId, targets, onSelectDate }) {
   const [cursor, setCursor] = useState(() => {
     const d = new Date();
     return { y: d.getFullYear(), m: d.getMonth() };
@@ -571,13 +643,13 @@ function CalendarView({ fb, uid, targets, onSelectDate }) {
   const yyyymm = `${cursor.y}-${String(cursor.m + 1).padStart(2, '0')}`;
 
   useEffect(() => {
-    if (!fb || !uid) return;
+    if (!fb || !profileId) return;
     setLoading(true);
-    loadMonth(fb, uid, yyyymm).then(data => {
+    loadMonth(fb, profileId, yyyymm).then(data => {
       setDays(data);
       setLoading(false);
     });
-  }, [fb, uid, yyyymm]);
+  }, [fb, profileId, yyyymm]);
 
   const firstOfMonth = new Date(cursor.y, cursor.m, 1);
   const daysInMonth = new Date(cursor.y, cursor.m + 1, 0).getDate();
@@ -737,7 +809,7 @@ Vraag: ${question}`;
   );
 }
 
-function WeekAnalysis({ fb, uid, targets, anthropicKey }) {
+function WeekAnalysis({ fb, profileId, targets, anthropicKey }) {
   const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
@@ -753,7 +825,7 @@ function WeekAnalysis({ fb, uid, targets, anthropicKey }) {
         const d = new Date();
         d.setDate(d.getDate() - i);
         const iso = d.toISOString().slice(0, 10);
-        const day = await loadDay(fb, uid, iso);
+        const day = await loadDay(fb, profileId, iso);
         if (day) {
           const t = sumEntries(day.entries);
           rows.push({ datum: iso, ...t });
@@ -809,7 +881,219 @@ ${customQ || `Geef een analyse over deze periode: gemiddeldes, trends, sterke en
   );
 }
 
-function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseConfig, profile, setProfile, fbStatus, fb, uid }) {
+/* ============================================================
+   PROFILE PICKER & EDITOR (Netflix-stijl)
+   ============================================================ */
+function ProfileTile({ profile, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className="group flex flex-col items-center gap-2 focus:outline-none"
+    >
+      <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl bg-white shadow-md flex items-center justify-center text-5xl sm:text-6xl transition group-hover:scale-105 group-hover:shadow-xl ring-2 ring-transparent group-hover:ring-emerald-500">
+        {profile.icon || '🙂'}
+      </div>
+      <div className="text-sm font-medium text-slate-700 group-hover:text-emerald-700">
+        {profile.name || 'Naamloos'}
+      </div>
+    </button>
+  );
+}
+
+function AddProfileTile({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className="group flex flex-col items-center gap-2 focus:outline-none"
+    >
+      <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl bg-slate-200 border-2 border-dashed border-slate-400 flex items-center justify-center text-4xl text-slate-500 transition group-hover:bg-slate-300 group-hover:scale-105">
+        ＋
+      </div>
+      <div className="text-sm font-medium text-slate-500 group-hover:text-slate-700">
+        Nieuw profiel
+      </div>
+    </button>
+  );
+}
+
+function ProfilePicker({ profiles, onSelect, onAdd, onEdit, loading }) {
+  return (
+    <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-6">
+      <h1 className="text-white text-3xl sm:text-4xl font-semibold mb-2">Wie eet er mee?</h1>
+      <p className="text-slate-400 text-sm mb-10">Kies een profiel om te beginnen.</p>
+
+      {loading ? (
+        <div className="text-slate-400">Profielen laden…</div>
+      ) : (
+        <>
+          <div className="flex flex-wrap justify-center gap-6 sm:gap-8 max-w-3xl">
+            {profiles.map(p => (
+              <ProfileTile key={p.id} profile={p} onClick={() => onSelect(p)} />
+            ))}
+            <AddProfileTile onClick={onAdd} />
+          </div>
+
+          {profiles.length > 0 && (
+            <button
+              onClick={() => onEdit()}
+              className="mt-10 text-slate-400 hover:text-white text-sm underline"
+            >
+              Profielen beheren
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ProfileManager({ profiles, onBack, onEdit, onDelete }) {
+  return (
+    <div className="min-h-screen bg-slate-900 p-6">
+      <div className="max-w-2xl mx-auto">
+        <div className="flex items-center justify-between mb-8">
+          <h1 className="text-white text-2xl font-semibold">Profielen beheren</h1>
+          <button onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Terug</button>
+        </div>
+        <div className="space-y-2">
+          {profiles.map(p => (
+            <div key={p.id} className="bg-slate-800 rounded-xl p-3 flex items-center gap-3">
+              <div className="w-12 h-12 rounded-lg bg-slate-700 flex items-center justify-center text-2xl shrink-0">{p.icon || '🙂'}</div>
+              <div className="flex-1 min-w-0">
+                <div className="text-white font-medium">{p.name}</div>
+                <div className="text-xs text-slate-400">{p.gender === 'v' ? 'Vrouw' : 'Man'}, {p.age} jr</div>
+              </div>
+              <button onClick={() => onEdit(p)} className="text-slate-300 hover:text-white text-xs px-3 py-1 rounded bg-slate-700 hover:bg-slate-600">Bewerk</button>
+              <button
+                onClick={() => {
+                  if (window.confirm(`Profiel "${p.name}" verwijderen? Alle geregistreerde data voor dit profiel gaat verloren.`)) onDelete(p);
+                }}
+                className="text-red-300 hover:text-red-100 text-xs px-3 py-1 rounded bg-red-900/50 hover:bg-red-900"
+              >Verwijder</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmojiPicker({ value, onChange }) {
+  return (
+    <div className="grid grid-cols-7 sm:grid-cols-10 gap-2">
+      {EMOJI_ICONS.map(e => (
+        <button
+          key={e}
+          type="button"
+          onClick={() => onChange(e)}
+          className={`aspect-square rounded-lg text-2xl flex items-center justify-center transition ${
+            value === e ? 'bg-emerald-600 ring-2 ring-emerald-400 scale-105' : 'bg-slate-700 hover:bg-slate-600'
+          }`}
+        >{e}</button>
+      ))}
+    </div>
+  );
+}
+
+function ProfileEditor({ initial, isFirstProfile, legacyDayCount, onSave, onCancel, saving, error }) {
+  const [p, setP] = useState(() => ({ ...DEFAULT_PROFILE, ...(initial || {}) }));
+  const [migrate, setMigrate] = useState(isFirstProfile && legacyDayCount > 0);
+
+  return (
+    <div className="min-h-screen bg-slate-900 p-6">
+      <div className="max-w-xl mx-auto">
+        <div className="flex items-center justify-between mb-6">
+          <h1 className="text-white text-2xl font-semibold">{initial?.id ? 'Profiel bewerken' : 'Nieuw profiel'}</h1>
+          <button onClick={onCancel} className="text-slate-400 hover:text-white text-sm">Annuleren</button>
+        </div>
+
+        <div className="bg-slate-800 rounded-2xl p-5 space-y-5">
+          <div>
+            <label className="block text-slate-300 text-sm mb-2">Icoon</label>
+            <EmojiPicker value={p.icon} onChange={(icon) => setP({ ...p, icon })} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block col-span-2">
+              <span className="text-slate-300 text-sm">Naam</span>
+              <input
+                value={p.name}
+                onChange={e => setP({ ...p, name: e.target.value })}
+                placeholder="Bv. Job"
+                className="w-full bg-slate-900 text-white border border-slate-700 rounded px-3 py-2 mt-1 focus:outline-none focus:border-emerald-500"
+              />
+            </label>
+            <label className="block">
+              <span className="text-slate-300 text-sm">Geslacht</span>
+              <select value={p.gender} onChange={e => setP({ ...p, gender: e.target.value })} className="w-full bg-slate-900 text-white border border-slate-700 rounded px-3 py-2 mt-1 focus:outline-none focus:border-emerald-500">
+                <option value="v">Vrouw</option>
+                <option value="m">Man</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-slate-300 text-sm">Leeftijd</span>
+              <input type="number" value={p.age} onChange={e => setP({ ...p, age: +e.target.value })} className="w-full bg-slate-900 text-white border border-slate-700 rounded px-3 py-2 mt-1 focus:outline-none focus:border-emerald-500" />
+            </label>
+            <label className="block">
+              <span className="text-slate-300 text-sm">Gewicht (kg)</span>
+              <input type="number" value={p.weightKg} onChange={e => setP({ ...p, weightKg: +e.target.value })} className="w-full bg-slate-900 text-white border border-slate-700 rounded px-3 py-2 mt-1 focus:outline-none focus:border-emerald-500" />
+            </label>
+            <label className="block">
+              <span className="text-slate-300 text-sm">Lengte (cm)</span>
+              <input type="number" value={p.heightCm} onChange={e => setP({ ...p, heightCm: +e.target.value })} className="w-full bg-slate-900 text-white border border-slate-700 rounded px-3 py-2 mt-1 focus:outline-none focus:border-emerald-500" />
+            </label>
+            <label className="block">
+              <span className="text-slate-300 text-sm">Beweging</span>
+              <select value={p.activity} onChange={e => setP({ ...p, activity: e.target.value })} className="w-full bg-slate-900 text-white border border-slate-700 rounded px-3 py-2 mt-1 focus:outline-none focus:border-emerald-500">
+                <option value="laag">Laag (zittend)</option>
+                <option value="matig">Matig</option>
+                <option value="hoog">Hoog</option>
+              </select>
+            </label>
+            <label className="block col-span-2">
+              <span className="text-slate-300 text-sm">Doel</span>
+              <select value={p.goal} onChange={e => setP({ ...p, goal: e.target.value })} className="w-full bg-slate-900 text-white border border-slate-700 rounded px-3 py-2 mt-1 focus:outline-none focus:border-emerald-500">
+                <option value="afvallen">Afvallen</option>
+                <option value="onderhoud">Onderhoud</option>
+                <option value="aankomen">Aankomen</option>
+              </select>
+            </label>
+          </div>
+
+          {isFirstProfile && legacyDayCount > 0 && (
+            <label className="flex items-start gap-3 bg-emerald-900/30 border border-emerald-800 rounded-lg p-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={migrate}
+                onChange={e => setMigrate(e.target.checked)}
+                className="mt-0.5"
+              />
+              <div className="text-sm text-emerald-200">
+                <div className="font-medium">Bestaande data koppelen aan dit profiel</div>
+                <div className="text-emerald-300/80 text-xs mt-0.5">
+                  We vonden {legacyDayCount} al geregistreerde {legacyDayCount === 1 ? 'dag' : 'dagen'} van vóór profielen bestonden. Koppel ze aan dit profiel.
+                </div>
+              </div>
+            </label>
+          )}
+
+          {error && <div className="bg-red-900/50 text-red-200 text-sm rounded p-2">{error}</div>}
+
+          <div className="flex gap-2 justify-end">
+            <button onClick={onCancel} className="text-slate-300 hover:text-white px-4 py-2 text-sm">Annuleren</button>
+            <button
+              onClick={() => onSave(p, migrate)}
+              disabled={saving || !p.name.trim()}
+              className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-700 disabled:text-slate-400 text-white rounded px-4 py-2 text-sm font-medium"
+            >{saving ? 'Opslaan…' : 'Opslaan'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseConfig, profile, setProfile, fbStatus, fb, uid, hideProfile, onSwitchProfile }) {
   const [rawFb, setRawFb] = useState(() => firebaseConfig ? JSON.stringify(firebaseConfig, null, 2) : '');
   const [fbErr, setFbErr] = useState(null);
   const [testResult, setTestResult] = useState(null);
@@ -869,50 +1153,75 @@ function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseCo
 
   return (
     <div className="p-4 space-y-4 max-w-2xl mx-auto">
-      <div className="bg-white rounded-xl p-4 shadow-sm">
-        <h2 className="font-semibold text-slate-800 mb-3">Jouw profiel</h2>
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <label className="block">
-            <span className="text-slate-600">Naam</span>
-            <input value={profile.name} onChange={e => setProfile({ ...profile, name: e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
-          </label>
-          <label className="block">
-            <span className="text-slate-600">Geslacht</span>
-            <select value={profile.gender} onChange={e => setProfile({ ...profile, gender: e.target.value })} className="w-full border rounded px-2 py-1 mt-1">
-              <option value="v">Vrouw</option>
-              <option value="m">Man</option>
-            </select>
-          </label>
-          <label className="block">
-            <span className="text-slate-600">Leeftijd</span>
-            <input type="number" value={profile.age} onChange={e => setProfile({ ...profile, age: +e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
-          </label>
-          <label className="block">
-            <span className="text-slate-600">Gewicht (kg)</span>
-            <input type="number" value={profile.weightKg} onChange={e => setProfile({ ...profile, weightKg: +e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
-          </label>
-          <label className="block">
-            <span className="text-slate-600">Lengte (cm)</span>
-            <input type="number" value={profile.heightCm} onChange={e => setProfile({ ...profile, heightCm: +e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
-          </label>
-          <label className="block">
-            <span className="text-slate-600">Beweging</span>
-            <select value={profile.activity} onChange={e => setProfile({ ...profile, activity: e.target.value })} className="w-full border rounded px-2 py-1 mt-1">
-              <option value="laag">Laag (zittend)</option>
-              <option value="matig">Matig</option>
-              <option value="hoog">Hoog</option>
-            </select>
-          </label>
-          <label className="block col-span-2">
-            <span className="text-slate-600">Doel</span>
-            <select value={profile.goal} onChange={e => setProfile({ ...profile, goal: e.target.value })} className="w-full border rounded px-2 py-1 mt-1">
-              <option value="afvallen">Afvallen</option>
-              <option value="onderhoud">Onderhoud</option>
-              <option value="aankomen">Aankomen</option>
-            </select>
-          </label>
+      {!hideProfile && (
+        <div className="bg-white rounded-xl p-4 shadow-sm">
+          <div className="flex items-center justify-between mb-3 gap-3">
+            <h2 className="font-semibold text-slate-800 flex items-center gap-2">
+              <span className="text-2xl">{profile.icon || '🙂'}</span>
+              <span>Profiel van {profile.name || '…'}</span>
+            </h2>
+            {onSwitchProfile && (
+              <button onClick={onSwitchProfile} className="text-xs text-emerald-700 hover:text-emerald-900 underline">Ander profiel kiezen</button>
+            )}
+          </div>
+          <div className="mb-3">
+            <span className="text-slate-600 text-sm">Icoon</span>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {EMOJI_ICONS.map(e => (
+                <button
+                  key={e}
+                  type="button"
+                  onClick={() => setProfile({ ...profile, icon: e })}
+                  className={`w-9 h-9 rounded-lg text-xl flex items-center justify-center transition ${
+                    profile.icon === e ? 'bg-emerald-600 ring-2 ring-emerald-400' : 'bg-slate-100 hover:bg-slate-200'
+                  }`}
+                >{e}</button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <label className="block">
+              <span className="text-slate-600">Naam</span>
+              <input value={profile.name} onChange={e => setProfile({ ...profile, name: e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
+            </label>
+            <label className="block">
+              <span className="text-slate-600">Geslacht</span>
+              <select value={profile.gender} onChange={e => setProfile({ ...profile, gender: e.target.value })} className="w-full border rounded px-2 py-1 mt-1">
+                <option value="v">Vrouw</option>
+                <option value="m">Man</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-slate-600">Leeftijd</span>
+              <input type="number" value={profile.age} onChange={e => setProfile({ ...profile, age: +e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
+            </label>
+            <label className="block">
+              <span className="text-slate-600">Gewicht (kg)</span>
+              <input type="number" value={profile.weightKg} onChange={e => setProfile({ ...profile, weightKg: +e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
+            </label>
+            <label className="block">
+              <span className="text-slate-600">Lengte (cm)</span>
+              <input type="number" value={profile.heightCm} onChange={e => setProfile({ ...profile, heightCm: +e.target.value })} className="w-full border rounded px-2 py-1 mt-1" />
+            </label>
+            <label className="block">
+              <span className="text-slate-600">Beweging</span>
+              <select value={profile.activity} onChange={e => setProfile({ ...profile, activity: e.target.value })} className="w-full border rounded px-2 py-1 mt-1">
+                <option value="laag">Laag (zittend)</option>
+                <option value="matig">Matig</option>
+                <option value="hoog">Hoog</option>
+              </select>
+            </label>
+            <label className="block col-span-2">
+              <span className="text-slate-600">Doel</span>
+              <select value={profile.goal} onChange={e => setProfile({ ...profile, goal: e.target.value })} className="w-full border rounded px-2 py-1 mt-1">
+                <option value="afvallen">Afvallen</option>
+                <option value="onderhoud">Onderhoud</option>
+                <option value="aankomen">Aankomen</option>
+              </select>
+            </label>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="bg-white rounded-xl p-4 shadow-sm">
         <h2 className="font-semibold text-slate-800 mb-3">Anthropic API key</h2>
@@ -978,50 +1287,142 @@ function App() {
     try { return JSON.parse(localStorage.getItem(LS_KEYS.firebaseConfig) || 'null'); }
     catch { return null; }
   });
-  const [profile, setProfileState] = useState(() => {
-    try { return { ...DEFAULT_PROFILE, ...(JSON.parse(localStorage.getItem(LS_KEYS.profile) || '{}')) }; }
-    catch { return DEFAULT_PROFILE; }
-  });
+  const [activeProfileId, setActiveProfileIdState] = useState(() => localStorage.getItem(LS_KEYS.activeProfileId) || null);
 
   const setAnthropicKey = (v) => { setAnthropicKeyState(v); localStorage.setItem(LS_KEYS.anthropicKey, v); };
   const setFirebaseConfig = (v) => { setFirebaseConfigState(v); localStorage.setItem(LS_KEYS.firebaseConfig, JSON.stringify(v)); };
-  const setProfile = (v) => { setProfileState(v); localStorage.setItem(LS_KEYS.profile, JSON.stringify(v)); };
+  const setActiveProfileId = (v) => {
+    setActiveProfileIdState(v);
+    if (v) localStorage.setItem(LS_KEYS.activeProfileId, v);
+    else localStorage.removeItem(LS_KEYS.activeProfileId);
+  };
 
-  const targets = useMemo(() => calcDailyTargets(profile), [profile]);
   const { fb, uid, error: fbError, phase: fbPhase } = useFirebase(firebaseConfig);
   const [saveError, setSaveError] = useState(null);
 
+  // Profile state
+  const [profiles, setProfiles] = useState([]);
+  const [profilesLoading, setProfilesLoading] = useState(false);
+  const [profilesError, setProfilesError] = useState(null);
+  const [pickerMode, setPickerMode] = useState('pick'); // pick | editor | manage
+  const [editingProfile, setEditingProfile] = useState(null); // object when editing; null when creating
+  const [profileSaveError, setProfileSaveError] = useState(null);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [legacyDayCount, setLegacyDayCount] = useState(0);
+
+  const activeProfile = useMemo(
+    () => profiles.find(p => p.id === activeProfileId) || null,
+    [profiles, activeProfileId]
+  );
+  const targets = useMemo(
+    () => activeProfile ? calcDailyTargets(activeProfile) : calcDailyTargets(DEFAULT_PROFILE),
+    [activeProfile]
+  );
+
+  // Load profiles once Firebase is ready
+  useEffect(() => {
+    if (!fb || !uid) return;
+    setProfilesLoading(true);
+    setProfilesError(null);
+    loadProfiles(fb)
+      .then(async (list) => {
+        setProfiles(list);
+        if (list.length === 0) {
+          // Check for legacy data under users/{uid}/days/ so we can offer migration
+          const n = await hasLegacyData(fb, uid);
+          setLegacyDayCount(n);
+        }
+        setProfilesLoading(false);
+      })
+      .catch(e => {
+        console.error('loadProfiles failed', e);
+        setProfilesError(e.message || String(e));
+        setProfilesLoading(false);
+      });
+  }, [fb, uid]);
+
+  // If activeProfileId references a profile that doesn't exist (anymore), clear it
+  useEffect(() => {
+    if (activeProfileId && profiles.length > 0 && !profiles.find(p => p.id === activeProfileId)) {
+      setActiveProfileId(null);
+    }
+  }, [profiles, activeProfileId]);
+
+  async function refreshProfiles() {
+    if (!fb) return;
+    const list = await loadProfiles(fb);
+    setProfiles(list);
+    return list;
+  }
+
+  async function handleSaveProfile(data, doMigrate) {
+    setProfileSaving(true); setProfileSaveError(null);
+    try {
+      let id = editingProfile?.id;
+      if (id) {
+        await updateProfile(fb, id, data);
+      } else {
+        id = await createProfile(fb, uid, data);
+        if (doMigrate && legacyDayCount > 0) {
+          await migrateLegacyDays(fb, uid, id);
+          setLegacyDayCount(0);
+        }
+      }
+      const list = await refreshProfiles();
+      setActiveProfileId(id);
+      setEditingProfile(null);
+      setPickerMode('pick');
+      setProfileSaving(false);
+    } catch (e) {
+      console.error('saveProfile failed', e);
+      setProfileSaveError(e.message || String(e));
+      setProfileSaving(false);
+    }
+  }
+
+  async function handleDeleteProfile(p) {
+    try {
+      await deleteProfile(fb, p.id);
+      if (activeProfileId === p.id) setActiveProfileId(null);
+      await refreshProfiles();
+    } catch (e) {
+      alert('Verwijderen mislukt: ' + (e.message || e));
+    }
+  }
+
+  // ---- Day data for active profile ----
   const [view, setView] = useState('chat'); // chat | calendar | week | settings
-  const [today, setToday] = useState(null); // { entries: [], messages: [] }
+  const [today, setToday] = useState(null);
   const [history, setHistory] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
   const [selectedDay, setSelectedDay] = useState(null);
 
-  // Load today on mount / when firebase ready
+  // Load today whenever active profile changes
   useEffect(() => {
-    if (!fb || !uid) return;
-    loadDay(fb, uid, todayISO()).then(d => {
+    if (!fb || !activeProfileId) { setToday(null); setHistory([]); return; }
+    loadDay(fb, activeProfileId, todayISO()).then(d => {
       setToday(d || { entries: [], messages: [] });
       setHistory((d && d.messages) || []);
+    }).catch(e => {
+      console.error('loadDay (today) failed', e);
+      setToday({ entries: [], messages: [] });
     });
-  }, [fb, uid]);
+  }, [fb, activeProfileId]);
 
   // Select another date
   const [selectedDayLoading, setSelectedDayLoading] = useState(false);
   const [selectedDayError, setSelectedDayError] = useState(null);
   useEffect(() => {
     if (!selectedDate) { setSelectedDay(null); setSelectedDayError(null); return; }
-    // For today, use the already-loaded `today` state so it stays in sync
-    // with entries added through the chat and we avoid an extra round-trip.
     if (selectedDate === todayISO()) {
       setSelectedDay(today || { entries: [] });
       setSelectedDayError(null);
       return;
     }
-    if (!fb || !uid) return;
+    if (!fb || !activeProfileId) return;
     setSelectedDayLoading(true);
     setSelectedDayError(null);
-    loadDay(fb, uid, selectedDate)
+    loadDay(fb, activeProfileId, selectedDate)
       .then(d => { setSelectedDay(d || { entries: [] }); setSelectedDayLoading(false); })
       .catch(e => {
         console.error('loadDay failed', e);
@@ -1029,17 +1430,17 @@ function App() {
         setSelectedDayError(e.message || String(e));
         setSelectedDayLoading(false);
       });
-  }, [fb, uid, selectedDate, today]);
+  }, [fb, activeProfileId, selectedDate, today]);
 
   async function handleNewEntries(items) {
     const newEntries = [...(today?.entries || []), ...items.map(i => ({ ...i, ts: Date.now() }))];
     setToday({ ...(today || {}), entries: newEntries });
-    if (!fb || !uid) {
-      setSaveError('Niet opgeslagen: Firebase is niet verbonden. Open ⚙ Instellingen voor details.');
+    if (!fb || !activeProfileId) {
+      setSaveError('Niet opgeslagen: geen actief profiel of Firebase niet verbonden.');
       return;
     }
     try {
-      await saveDay(fb, uid, todayISO(), { entries: newEntries });
+      await saveDay(fb, activeProfileId, todayISO(), { entries: newEntries });
       setSaveError(null);
     } catch (e) {
       console.error('saveDay failed', e);
@@ -1057,12 +1458,12 @@ function App() {
     if (selectedDate === date) {
       setSelectedDay({ ...(selectedDay || {}), entries: newEntries });
     }
-    if (!fb || !uid) {
-      setSaveError('Niet opgeslagen: Firebase is niet verbonden.');
+    if (!fb || !activeProfileId) {
+      setSaveError('Niet opgeslagen: geen actief profiel of Firebase niet verbonden.');
       return;
     }
     try {
-      await saveDay(fb, uid, date, { entries: newEntries });
+      await saveDay(fb, activeProfileId, date, { entries: newEntries });
       setSaveError(null);
     } catch (e) {
       console.error('saveDay failed', e);
@@ -1070,8 +1471,28 @@ function App() {
     }
   }
   async function handleMessages(msgs) {
-    if (!fb || !uid) return;
-    await saveDay(fb, uid, todayISO(), { messages: msgs });
+    if (!fb || !activeProfileId) return;
+    await saveDay(fb, activeProfileId, todayISO(), { messages: msgs });
+  }
+
+  // Save edits to the active profile (from Settings).
+  // Optimistic local update + debounced remote save, so every keystroke
+  // doesn't trigger a Firestore write.
+  const saveProfileTimer = useRef(null);
+  function handleUpdateActiveProfile(next) {
+    if (!activeProfileId) return;
+    // Optimistic local update so inputs stay in sync between keystrokes
+    setProfiles(ps => ps.map(p => p.id === activeProfileId ? { ...p, ...next } : p));
+    if (!fb) return;
+    clearTimeout(saveProfileTimer.current);
+    saveProfileTimer.current = setTimeout(async () => {
+      try {
+        await updateProfile(fb, activeProfileId, next);
+      } catch (e) {
+        console.error('updateProfile failed', e);
+        setSaveError('Profiel opslaan mislukt: ' + (e.message || e));
+      }
+    }, 600);
   }
 
   const fbStatus = !firebaseConfig
@@ -1083,12 +1504,124 @@ function App() {
         : `verbinden… (${fbPhase})`;
   const needsConfig = !firebaseConfig || !anthropicKey;
 
+  // ----- Startup screens: config gate + profile picker -----
+
+  // 1. Missing API key / Firebase config → force Settings screen
+  if (needsConfig) {
+    return (
+      <div className="flex flex-col h-screen max-w-3xl mx-auto bg-slate-100">
+        <header className="bg-white border-b px-4 py-3">
+          <h1 className="font-bold text-slate-800">🥗 Maaltijd Tracker</h1>
+          <div className="text-xs text-slate-500">Eerst even instellen…</div>
+        </header>
+        <div className="bg-amber-100 text-amber-800 text-sm px-4 py-2 border-b border-amber-200">
+          ⚠ Vul je Anthropic API key en Firebase config in om te beginnen.
+        </div>
+        <main className="flex-1 overflow-y-auto">
+          <Settings
+            anthropicKey={anthropicKey}
+            setAnthropicKey={setAnthropicKey}
+            firebaseConfig={firebaseConfig}
+            setFirebaseConfig={setFirebaseConfig}
+            profile={activeProfile || DEFAULT_PROFILE}
+            setProfile={handleUpdateActiveProfile}
+            fbStatus={fbStatus}
+            fb={fb}
+            uid={uid}
+            hideProfile={!activeProfile}
+          />
+        </main>
+      </div>
+    );
+  }
+
+  // 2. Firebase not ready yet
+  if (!fb || !uid) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-6 text-slate-300">
+        <div className="text-4xl mb-3">🥗</div>
+        <div className="text-sm">
+          {fbPhase === 'error' ? '🛑 Firebase-fout' : 'Verbinden met Firebase…'}
+        </div>
+        {fbError && (
+          <div className="mt-3 bg-red-900/40 text-red-200 text-xs rounded p-3 max-w-md">
+            {fbError}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // 3. Profile picker / editor / manager
+  if (!activeProfileId) {
+    if (pickerMode === 'editor') {
+      const isFirst = profiles.length === 0;
+      return (
+        <ProfileEditor
+          initial={editingProfile || (isFirst ? { name: 'Job', icon: '🦊' } : null)}
+          isFirstProfile={isFirst}
+          legacyDayCount={isFirst ? legacyDayCount : 0}
+          onSave={handleSaveProfile}
+          onCancel={() => {
+            setEditingProfile(null);
+            setPickerMode(profiles.length === 0 ? 'editor' : 'pick');
+          }}
+          saving={profileSaving}
+          error={profileSaveError}
+        />
+      );
+    }
+    if (pickerMode === 'manage') {
+      return (
+        <ProfileManager
+          profiles={profiles}
+          onBack={() => setPickerMode('pick')}
+          onEdit={(p) => { setEditingProfile(p); setPickerMode('editor'); }}
+          onDelete={handleDeleteProfile}
+        />
+      );
+    }
+    // 'pick' (auto-open editor if no profiles)
+    if (!profilesLoading && profiles.length === 0) {
+      return (
+        <ProfileEditor
+          initial={{ name: 'Job', icon: '🦊' }}
+          isFirstProfile={true}
+          legacyDayCount={legacyDayCount}
+          onSave={handleSaveProfile}
+          onCancel={() => {}}
+          saving={profileSaving}
+          error={profileSaveError}
+        />
+      );
+    }
+    return (
+      <ProfilePicker
+        profiles={profiles}
+        loading={profilesLoading}
+        onSelect={(p) => setActiveProfileId(p.id)}
+        onAdd={() => { setEditingProfile(null); setPickerMode('editor'); }}
+        onEdit={() => setPickerMode('manage')}
+      />
+    );
+  }
+
+  // 4. Main app with active profile
   return (
     <div className="flex flex-col h-screen max-w-3xl mx-auto bg-slate-100">
-      <header className="bg-white border-b px-4 py-3 flex items-center justify-between">
-        <div>
-          <h1 className="font-bold text-slate-800">🥗 Maaltijd Tracker</h1>
-          <div className="text-xs text-slate-500 capitalize">{formatDateNL(todayISO())}</div>
+      <header className="bg-white border-b px-4 py-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <button
+            onClick={() => setActiveProfileId(null)}
+            title="Ander profiel kiezen"
+            className="w-10 h-10 shrink-0 rounded-lg bg-slate-100 hover:bg-emerald-100 flex items-center justify-center text-2xl transition"
+          >
+            {activeProfile?.icon || '🙂'}
+          </button>
+          <div className="min-w-0">
+            <h1 className="font-bold text-slate-800 truncate">{activeProfile?.name || 'Profiel'}</h1>
+            <div className="text-xs text-slate-500 capitalize">{formatDateNL(todayISO())}</div>
+          </div>
         </div>
         <nav className="flex gap-1 text-sm">
           <button onClick={() => setView('chat')} className={`px-3 py-1.5 rounded-lg ${view==='chat'?'bg-emerald-600 text-white':'hover:bg-slate-200'}`}>Chat</button>
@@ -1097,19 +1630,6 @@ function App() {
           <button onClick={() => setView('settings')} className={`px-3 py-1.5 rounded-lg ${view==='settings'?'bg-emerald-600 text-white':'hover:bg-slate-200'}`}>⚙</button>
         </nav>
       </header>
-
-      {needsConfig && view !== 'settings' && (
-        <div className="bg-amber-100 text-amber-800 text-sm px-4 py-2 border-b border-amber-200">
-          ⚠ Configuratie incompleet. <button onClick={() => setView('settings')} className="underline font-medium">Open instellingen</button>
-        </div>
-      )}
-
-      {firebaseConfig && !uid && fbPhase !== 'ready' && view !== 'settings' && (
-        <div className={`text-sm px-4 py-2 border-b ${fbPhase === 'error' ? 'bg-red-100 text-red-800 border-red-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
-          {fbPhase === 'error' ? '🛑' : '⏳'} Firebase: {fbPhase === 'loading-sdk' ? 'SDK laden…' : fbPhase === 'init' ? 'initialiseren…' : fbPhase === 'signing-in' ? 'inloggen…' : fbPhase === 'error' ? (fbError || 'fout') : fbPhase}
-          {fbPhase === 'error' && <button onClick={() => setView('settings')} className="ml-2 underline font-medium">Naar instellingen</button>}
-        </div>
-      )}
 
       {saveError && (
         <div className="bg-red-100 text-red-800 text-sm px-4 py-2 border-b border-red-200 flex items-start justify-between gap-3">
@@ -1127,7 +1647,7 @@ function App() {
                 onNewEntries={handleNewEntries}
                 onMessage={handleMessages}
                 targets={targets}
-                profile={profile}
+                profile={activeProfile}
                 history={history}
                 setHistory={setHistory}
                 anthropicKey={anthropicKey}
@@ -1146,17 +1666,17 @@ function App() {
           </div>
         )}
 
-        {view === 'calendar' && fb && uid && (
+        {view === 'calendar' && (
           <CalendarView
             fb={fb}
-            uid={uid}
+            profileId={activeProfileId}
             targets={targets}
             onSelectDate={setSelectedDate}
           />
         )}
 
-        {view === 'week' && fb && uid && (
-          <WeekAnalysis fb={fb} uid={uid} targets={targets} anthropicKey={anthropicKey} />
+        {view === 'week' && (
+          <WeekAnalysis fb={fb} profileId={activeProfileId} targets={targets} anthropicKey={anthropicKey} />
         )}
 
         {view === 'settings' && (
@@ -1165,11 +1685,12 @@ function App() {
             setAnthropicKey={setAnthropicKey}
             firebaseConfig={firebaseConfig}
             setFirebaseConfig={setFirebaseConfig}
-            profile={profile}
-            setProfile={setProfile}
+            profile={activeProfile || DEFAULT_PROFILE}
+            setProfile={handleUpdateActiveProfile}
             fbStatus={fbStatus}
             fb={fb}
             uid={uid}
+            onSwitchProfile={() => setActiveProfileId(null)}
           />
         )}
       </main>
@@ -1181,7 +1702,7 @@ function App() {
           targets={targets}
           onClose={() => setSelectedDate(null)}
           anthropicKey={anthropicKey}
-          profile={profile}
+          profile={activeProfile}
           loading={selectedDayLoading}
           error={selectedDayError}
           onDelete={(i) => handleDeleteEntry(selectedDate, i)}
