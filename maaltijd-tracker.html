@@ -194,6 +194,14 @@ Het veld "datum" bepaalt op welke dag de items geregistreerd worden.
 - Als de gebruiker tijd/datum aangeeft ("gisteren", "eergisteren", "vorige week maandag", "afgelopen zaterdag", "15 april", "15-04", "maandag om 12u"), reken je het om naar een ISO-datum YYYY-MM-DD en zet je die in "datum".
 - Twijfel je of de gebruiker een andere dag bedoelt? Vraag het kort na en zet status op "needs_clarification".
 - Géén datum genoemd = vandaag. Vraag dit dan NIET na.
+
+DEDUPLICATIE (zéér belangrijk):
+- Items die je in een eerder antwoord al met status="complete" hebt geretourneerd, zijn door de app definitief opgeslagen.
+- Je HERHAALT deze items NIET in "items" in latere berichten. Ook niet bij een vervolgvraag, herformulering of correctie.
+- Let op de markering "[REEDS GEREGISTREERD: …]" die in je eigen eerdere antwoorden staat — dat zijn de items die al opgeslagen zijn.
+- Ook in de context-blokken "Al geregistreerd vandaag" / "Al geregistreerd op {datum}" zie je wat er al in de database staat. Die items neem je niet opnieuw op in "items".
+- Wil de gebruiker een eerder geregistreerd item aanpassen? Zet dan status="needs_clarification" en zeg vriendelijk in "reply" dat hij het oude item via het ×-knopje in het dagoverzicht kan verwijderen en daarna de juiste versie nog eens kan doorgeven.
+- Alleen items die de gebruiker nú in dit bericht noemt én die nog niet geregistreerd zijn, horen in "items".
 `;
 
 const ANALYSIS_SYSTEM = `Je bent een voedingscoach die op basis van geregistreerde dagtotalen korte, inzichtvolle analyses geeft.
@@ -540,12 +548,24 @@ ${todayEntries || '(nog niks)'}
 Nieuwe input van gebruiker:
 ${userText}`;
 
-      // Bouw messages voor Claude (alleen laatste paar user/assistant)
+      // Bouw messages voor Claude (alleen laatste paar user/assistant).
+      // Belangrijk: bij assistant-berichten plakken we een "[REEDS GEREGISTREERD: …]"
+      // samenvatting achter de reply, zodat Claude in vervolgberichten niet opnieuw
+      // dezelfde items uitvoert.
       const claudeMessages = [];
       const tail = newHistory.slice(-8);
       for (const m of tail) {
         if (m.role === 'user' && m === tail[tail.length - 1]) {
           claudeMessages.push({ role: 'user', content: contextMsg });
+        } else if (m.role === 'assistant' && m.mealData && Array.isArray(m.mealData.items) && m.mealData.items.length) {
+          const d = m.mealData.datum || todayISO();
+          const summary = m.mealData.items
+            .map(it => `${it.naam} (${it.hoeveelheid}, ${Math.round(it.kcal || 0)} kcal)`)
+            .join('; ');
+          claudeMessages.push({
+            role: 'assistant',
+            content: `${m.content}\n\n[REEDS GEREGISTREERD op ${d}: ${summary}. Deze items zijn definitief opgeslagen in de database. Herhaal ze NIET in "items".]`
+          });
         } else {
           claudeMessages.push({ role: m.role, content: m.content });
         }
