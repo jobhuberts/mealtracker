@@ -1636,6 +1636,8 @@ function App() {
   const [history, setHistory] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
   const [selectedDay, setSelectedDay] = useState(null);
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
+  const todayTotals = useMemo(() => sumEntries(today?.entries || []), [today]);
 
   // Load today whenever active profile changes
   useEffect(() => {
@@ -1868,10 +1870,6 @@ function App() {
       />
     );
   }
-
-  // Mobile bottom sheet voor dagtotalen
-  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
-  const todayTotals = useMemo(() => sumEntries(today?.entries || []), [today]);
 
   // 4. Main app with active profile
   return (
