@@ -167,6 +167,7 @@ Daarin staat strikt geldige JSON met dit schema:
 {
   "status": "complete" | "needs_clarification",
   "reply": "korte conversationele tekst voor de gebruiker",
+  "datum": "YYYY-MM-DD",
   "items": [
     {
       "naam": "string (NL, bv. 'Bruine boterham met jonge kaas')",
@@ -186,6 +187,13 @@ Daarin staat strikt geldige JSON met dit schema:
 - Zet onbekende micro's op 0 i.p.v. weglaten.
 - Gebruik realistische NL-portiegroottes als de gebruiker geen gram noemt.
 - "reply" mag een korte bevestiging zijn (1-3 zinnen, geen lange opsomming — items staan immers al in het dagoverzicht).
+
+DATUM-BEPALING (belangrijk):
+Het veld "datum" bepaalt op welke dag de items geregistreerd worden.
+- Standaard is dat vandaag (de "Vandaag"-datum die in de context staat).
+- Als de gebruiker tijd/datum aangeeft ("gisteren", "eergisteren", "vorige week maandag", "afgelopen zaterdag", "15 april", "15-04", "maandag om 12u"), reken je het om naar een ISO-datum YYYY-MM-DD en zet je die in "datum".
+- Twijfel je of de gebruiker een andere dag bedoelt? Vraag het kort na en zet status op "needs_clarification".
+- Géén datum genoemd = vandaag. Vraag dit dan NIET na.
 `;
 
 const ANALYSIS_SYSTEM = `Je bent een voedingscoach die op basis van geregistreerde dagtotalen korte, inzichtvolle analyses geeft.
@@ -522,9 +530,11 @@ function ChatView({ day, onNewEntries, onMessage, targets, profile, history, set
         `- ${e.naam} (${e.hoeveelheid}) — ${Math.round(e.kcal)} kcal`
       ).join('\n');
 
-      const contextMsg = `Profiel: ${profile.gender === 'v' ? 'vrouw' : 'man'}, ${profile.age} jr, ${profile.weightKg} kg.
+      const tIso = todayISO();
+      const contextMsg = `Vandaag: ${tIso} (${formatDateNL(tIso)}).
+Profiel: ${profile.gender === 'v' ? 'vrouw' : 'man'}, ${profile.age} jr, ${profile.weightKg} kg.
 Dagdoelen: ${targets.kcal} kcal · ${targets.eiwit_g} g eiwit · ${targets.vezels_g} g vezels.
-Al geregistreerd vandaag (${formatDateNL(todayISO())}):
+Al geregistreerd vandaag:
 ${todayEntries || '(nog niks)'}
 
 Nieuwe input van gebruiker:
@@ -561,7 +571,10 @@ ${userText}`;
       onMessage(after);
 
       if (mealData && mealData.status === 'complete' && Array.isArray(mealData.items) && mealData.items.length) {
-        onNewEntries(mealData.items);
+        // Validate the date field. If missing/invalid, default to today.
+        const isoRe = /^\d{4}-\d{2}-\d{2}$/;
+        const targetDate = (mealData.datum && isoRe.test(mealData.datum)) ? mealData.datum : todayISO();
+        onNewEntries(mealData.items, targetDate);
       }
     } catch (e) {
       console.error(e);
@@ -588,11 +601,23 @@ ${userText}`;
                 : 'bg-white text-slate-800 rounded-bl-sm shadow-sm'
             }`}>
               {m.content}
-              {m.mealData && m.mealData.items && m.mealData.items.length > 0 && (
-                <div className="mt-2 pt-2 border-t border-slate-200 text-xs text-slate-500">
-                  ✓ {m.mealData.items.length} {m.mealData.items.length === 1 ? 'item' : 'items'} toegevoegd aan je dagtotalen
-                </div>
-              )}
+              {m.mealData && m.mealData.items && m.mealData.items.length > 0 && (() => {
+                const dateLabel = (() => {
+                  const d = m.mealData.datum;
+                  const t = todayISO();
+                  if (!d || d === t) return 'vandaag';
+                  // Compare against yesterday
+                  const y = new Date(); y.setDate(y.getDate() - 1);
+                  const yIso = y.toISOString().slice(0, 10);
+                  if (d === yIso) return 'gisteren';
+                  return shortDateNL(d);
+                })();
+                return (
+                  <div className="mt-2 pt-2 border-t border-slate-200 text-xs text-slate-500">
+                    ✓ {m.mealData.items.length} {m.mealData.items.length === 1 ? 'item' : 'items'} toegevoegd aan {dateLabel}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         ))}
@@ -1432,19 +1457,42 @@ function App() {
       });
   }, [fb, activeProfileId, selectedDate, today]);
 
-  async function handleNewEntries(items) {
-    const newEntries = [...(today?.entries || []), ...items.map(i => ({ ...i, ts: Date.now() }))];
-    setToday({ ...(today || {}), entries: newEntries });
+  async function handleNewEntries(items, targetDate) {
+    const date = targetDate || todayISO();
+    const stamped = items.map(i => ({ ...i, ts: Date.now() }));
+
     if (!fb || !activeProfileId) {
       setSaveError('Niet opgeslagen: geen actief profiel of Firebase niet verbonden.');
       return;
     }
+
+    if (date === todayISO()) {
+      // Vandaag: update lokaal today-state direct voor snelle UI-feedback
+      const newEntries = [...(today?.entries || []), ...stamped];
+      setToday({ ...(today || {}), entries: newEntries });
+      try {
+        await saveDay(fb, activeProfileId, date, { entries: newEntries });
+        setSaveError(null);
+      } catch (e) {
+        console.error('saveDay failed', e);
+        setSaveError('Opslaan mislukt: ' + (e.message || String(e)));
+      }
+      return;
+    }
+
+    // Andere dag: laad die dag, append, sla op
     try {
-      await saveDay(fb, activeProfileId, todayISO(), { entries: newEntries });
+      const existing = (await loadDay(fb, activeProfileId, date)) || { entries: [] };
+      const newEntries = [...(existing.entries || []), ...stamped];
+      await saveDay(fb, activeProfileId, date, { entries: newEntries });
+      // Als deze dag op dat moment open is in het detailmodaal: update dat óók
+      if (selectedDate === date) {
+        setSelectedDay({ ...(existing || {}), entries: newEntries });
+      }
       setSaveError(null);
     } catch (e) {
-      console.error('saveDay failed', e);
-      setSaveError('Opslaan mislukt: ' + (e.message || String(e)));
+      console.error('saveDay (other day) failed', e);
+      setSaveError(`Opslaan mislukt voor ${date}: ` + (e.message || String(e)));
     }
   }
   async function handleDeleteEntry(date, index) {
