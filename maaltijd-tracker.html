@@ -45,9 +45,26 @@
   .scrollbar-thin::-webkit-scrollbar { width: 6px; }
   .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
 
+  /* Dynamic viewport height — 100dvh shrinkt mee met de toetsenbord-area op iOS */
+  .h-dvh { height: 100dvh; height: 100vh; } /* fallback first, dvh wint */
+  .h-dvh { height: 100dvh; }
+  .min-h-dvh { min-height: 100dvh; min-height: 100vh; }
+  .min-h-dvh { min-height: 100dvh; }
+
   /* Respect iPhone safe-area insets (home indicator, notch) */
   .safe-pb { padding-bottom: max(env(safe-area-inset-bottom), 0.75rem); }
   .safe-pt { padding-top: max(env(safe-area-inset-top), 0rem); }
+
+  /* Extra bottom room voor de chat-input op mobiel zodat 'ie boven
+     de iOS-homebar en het keyboard-verwerkingsgebied uitkomt */
+  .chat-input-pb {
+    padding-bottom: max(env(safe-area-inset-bottom), 0.75rem);
+  }
+  @media (max-width: 767px) {
+    .chat-input-pb {
+      padding-bottom: calc(max(env(safe-area-inset-bottom), 0.75rem) + 1rem);
+    }
+  }
 
   /* Bottom sheet slide-up animation */
   @keyframes sheet-in {
@@ -688,7 +705,7 @@ ${userText}`;
           <div className="bg-red-50 text-red-700 text-xs rounded-lg p-2">{error}</div>
         )}
       </div>
-      <div className="border-t bg-white p-3 safe-pb">
+      <div className="border-t bg-white p-3 chat-input-pb">
         <div className="flex gap-2 items-end">
           <textarea
             value={input}
@@ -1040,7 +1057,7 @@ function AddProfileTile({ onClick }) {
 
 function ProfilePicker({ profiles, onSelect, onAdd, onEdit, loading }) {
   return (
-    <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-6">
+    <div className="min-h-dvh bg-slate-900 flex flex-col items-center justify-center p-6">
       <h1 className="text-white text-3xl sm:text-4xl font-semibold mb-2">Wie eet er mee?</h1>
       <p className="text-slate-400 text-sm mb-10">Kies een profiel om te beginnen.</p>
 
@@ -1071,7 +1088,7 @@ function ProfilePicker({ profiles, onSelect, onAdd, onEdit, loading }) {
 
 function ProfileManager({ profiles, onBack, onEdit, onDelete }) {
   return (
-    <div className="min-h-screen bg-slate-900 p-6">
+    <div className="min-h-dvh bg-slate-900 p-6">
       <div className="max-w-2xl mx-auto">
         <div className="flex items-center justify-between mb-8">
           <h1 className="text-white text-2xl font-semibold">Profielen beheren</h1>
@@ -1122,7 +1139,7 @@ function ProfileEditor({ initial, isFirstProfile, legacyDayCount, onSave, onCanc
   const [migrate, setMigrate] = useState(isFirstProfile && legacyDayCount > 0);
 
   return (
-    <div className="min-h-screen bg-slate-900 p-6">
+    <div className="min-h-dvh bg-slate-900 p-6">
       <div className="max-w-xl mx-auto">
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-white text-2xl font-semibold">{initial?.id ? 'Profiel bewerken' : 'Nieuw profiel'}</h1>
@@ -1774,7 +1791,7 @@ function App() {
   // 1. Missing API key / Firebase config → force Settings screen
   if (needsConfig) {
     return (
-      <div className="flex flex-col h-screen max-w-3xl mx-auto bg-slate-100">
+      <div className="flex flex-col h-dvh max-w-3xl mx-auto bg-slate-100">
         <header className="bg-white border-b px-4 py-3">
           <h1 className="font-bold text-slate-800">🥗 Maaltijd Tracker</h1>
           <div className="text-xs text-slate-500">Eerst even instellen…</div>
@@ -1803,7 +1820,7 @@ function App() {
   // 2. Firebase not ready yet
   if (!fb || !uid) {
     return (
-      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-6 text-slate-300">
+      <div className="min-h-dvh bg-slate-900 flex flex-col items-center justify-center p-6 text-slate-300">
         <div className="text-4xl mb-3">🥗</div>
         <div className="text-sm">
           {fbPhase === 'error' ? '🛑 Firebase-fout' : 'Verbinden met Firebase…'}
@@ -1873,7 +1890,7 @@ function App() {
 
   // 4. Main app with active profile
   return (
-    <div className="flex flex-col h-screen max-w-3xl mx-auto bg-slate-100">
+    <div className="flex flex-col h-dvh max-w-3xl mx-auto bg-slate-100">
       <header className="bg-white border-b px-3 sm:px-4 py-3 flex items-center justify-between gap-2 sm:gap-3 safe-pt">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
           <button
