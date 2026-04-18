@@ -2,8 +2,19 @@
 <html lang="nl">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Maaltijd Tracker</title>
+
+<!-- PWA / mobile install -->
+<link rel="manifest" href="manifest.webmanifest" />
+<meta name="theme-color" content="#10b981" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Maaltijden" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+
 <script src="https://cdn.tailwindcss.com"></script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -25,10 +36,35 @@
 </script>
 <style>
   html, body, #root { height: 100%; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    /* Prevent iOS overscroll of the whole page when sheets/chat scroll */
+    overscroll-behavior-y: none;
+  }
   .chat-bubble { white-space: pre-wrap; word-break: break-word; }
   .scrollbar-thin::-webkit-scrollbar { width: 6px; }
   .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+  /* Respect iPhone safe-area insets (home indicator, notch) */
+  .safe-pb { padding-bottom: max(env(safe-area-inset-bottom), 0.75rem); }
+  .safe-pt { padding-top: max(env(safe-area-inset-top), 0rem); }
+
+  /* Bottom sheet slide-up animation */
+  @keyframes sheet-in {
+    from { transform: translateY(100%); }
+    to   { transform: translateY(0); }
+  }
+  .sheet-in { animation: sheet-in 200ms ease-out; }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  .fade-in { animation: fade-in 150ms ease-out; }
+
+  /* Prevent iOS from zooming the page when tapping an input (< 16px) */
+  @media (max-width: 767px) {
+    input, select, textarea { font-size: 16px !important; }
+  }
 </style>
 </head>
 <body class="bg-slate-50">
@@ -502,7 +538,7 @@ function EntriesList({ entries, onDelete }) {
               onClick={() => handleDelete(i, e)}
               aria-label={`Verwijder ${e.naam}`}
               title="Verwijderen"
-              className="shrink-0 w-6 h-6 rounded-full text-slate-400 hover:bg-red-100 hover:text-red-600 flex items-center justify-center text-sm leading-none"
+              className="shrink-0 min-w-[44px] min-h-[44px] sm:min-w-[28px] sm:min-h-[28px] w-11 h-11 sm:w-7 sm:h-7 rounded-full text-slate-400 hover:bg-red-100 hover:text-red-600 active:bg-red-200 flex items-center justify-center text-lg sm:text-sm leading-none"
             >×</button>
           )}
         </div>
@@ -652,8 +688,8 @@ ${userText}`;
           <div className="bg-red-50 text-red-700 text-xs rounded-lg p-2">{error}</div>
         )}
       </div>
-      <div className="border-t bg-white p-3">
-        <div className="flex gap-2">
+      <div className="border-t bg-white p-3 safe-pb">
+        <div className="flex gap-2 items-end">
           <textarea
             value={input}
             onChange={e => setInput(e.target.value)}
@@ -662,12 +698,13 @@ ${userText}`;
             }}
             rows={2}
             placeholder="Typ wat je gegeten hebt…"
-            className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none"
+            className="flex-1 border rounded-lg px-3 py-2 text-base sm:text-sm min-h-[48px] focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none"
           />
           <button
             onClick={send}
             disabled={sending || !input.trim()}
-            className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-lg px-4 py-2 text-sm font-medium"
+            aria-label="Verstuur bericht"
+            className="bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:bg-slate-300 text-white rounded-lg px-4 sm:px-4 py-2 text-sm font-medium min-h-[48px] min-w-[72px]"
           >
             Stuur
           </button>
@@ -717,49 +754,85 @@ function CalendarView({ fb, profileId, targets, onSelectDate }) {
 
   const monthLabel = new Date(cursor.y, cursor.m, 1).toLocaleDateString('nl-NL', { month: 'long', year: 'numeric' });
 
+  // Mobiele lijst: dagen (met data) van nieuw naar oud
+  const listDays = cells
+    .filter(c => c && days[c.iso])
+    .sort((a, b) => b.iso.localeCompare(a.iso));
+
   return (
-    <div className="p-4">
-      <div className="flex justify-between items-center mb-4">
-        <button onClick={prev} className="px-3 py-1 rounded hover:bg-slate-200">←</button>
-        <h2 className="text-lg font-semibold capitalize">{monthLabel}</h2>
-        <button onClick={next} className="px-3 py-1 rounded hover:bg-slate-200">→</button>
+    <div className="flex-1 overflow-y-auto scrollbar-thin p-3 sm:p-4">
+      <div className="flex justify-between items-center mb-4 gap-2">
+        <button
+          onClick={prev}
+          aria-label="Vorige maand"
+          className="min-w-[44px] min-h-[44px] px-3 rounded-lg hover:bg-slate-200 active:bg-slate-300 text-lg"
+        >←</button>
+        <h2 className="text-base sm:text-lg font-semibold capitalize text-center flex-1">{monthLabel}</h2>
+        <button
+          onClick={next}
+          aria-label="Volgende maand"
+          className="min-w-[44px] min-h-[44px] px-3 rounded-lg hover:bg-slate-200 active:bg-slate-300 text-lg"
+        >→</button>
       </div>
-      <div className="grid grid-cols-7 gap-1 text-xs text-slate-500 mb-1">
-        {['Ma','Di','Wo','Do','Vr','Za','Zo'].map(d => (
-          <div key={d} className="text-center font-medium">{d}</div>
+
+      {/* Mobiele lijst (tot md) */}
+      <div className="md:hidden space-y-2">
+        {listDays.length === 0 && !loading && (
+          <div className="text-center text-sm text-slate-500 py-8">
+            Geen geregistreerde dagen in {monthLabel.toLowerCase()}.
+          </div>
+        )}
+        {listDays.map(c => (
+          <DayListCard
+            key={c.iso}
+            date={c.iso}
+            day={days[c.iso]}
+            targets={targets}
+            onClick={() => onSelectDate(c.iso)}
+          />
         ))}
       </div>
-      <div className="grid grid-cols-7 gap-1">
-        {cells.map((c, i) => {
-          if (!c) return <div key={i} />;
-          const day = days[c.iso];
-          const totals = day ? sumEntries(day.entries) : null;
-          const kcalPct = totals ? Math.min(100, Math.round((totals.kcal / targets.kcal) * 100)) : 0;
-          const isToday = c.iso === todayISO();
-          return (
-            <button
-              key={i}
-              onClick={() => onSelectDate(c.iso)}
-              className={`aspect-square rounded-lg p-1 flex flex-col items-center justify-start text-xs hover:bg-emerald-50 transition ${
-                isToday ? 'ring-2 ring-emerald-500' : 'bg-white shadow-sm'
-              }`}
-            >
-              <div className="font-medium text-slate-700">{c.d}</div>
-              {totals && (
-                <>
-                  <div className="text-[10px] text-slate-500 mt-0.5 tabular-nums">{Math.round(totals.kcal)}</div>
-                  <div className="w-full h-1 bg-slate-200 rounded mt-auto overflow-hidden">
-                    <div
-                      className={`h-full ${kcalPct > 110 ? 'bg-red-400' : kcalPct < 60 ? 'bg-amber-400' : 'bg-emerald-500'}`}
-                      style={{ width: `${Math.min(kcalPct, 100)}%` }}
-                    />
-                  </div>
-                </>
-              )}
-            </button>
-          );
-        })}
+
+      {/* Desktop grid (md+) */}
+      <div className="hidden md:block">
+        <div className="grid grid-cols-7 gap-1 text-xs text-slate-500 mb-1">
+          {['Ma','Di','Wo','Do','Vr','Za','Zo'].map(d => (
+            <div key={d} className="text-center font-medium">{d}</div>
+          ))}
+        </div>
+        <div className="grid grid-cols-7 gap-1">
+          {cells.map((c, i) => {
+            if (!c) return <div key={i} />;
+            const day = days[c.iso];
+            const totals = day ? sumEntries(day.entries) : null;
+            const kcalPct = totals ? Math.min(100, Math.round((totals.kcal / targets.kcal) * 100)) : 0;
+            const isToday = c.iso === todayISO();
+            return (
+              <button
+                key={i}
+                onClick={() => onSelectDate(c.iso)}
+                className={`aspect-square rounded-lg p-1 flex flex-col items-center justify-start text-xs hover:bg-emerald-50 transition ${
+                  isToday ? 'ring-2 ring-emerald-500' : 'bg-white shadow-sm'
+                }`}
+              >
+                <div className="font-medium text-slate-700">{c.d}</div>
+                {totals && (
+                  <>
+                    <div className="text-[10px] text-slate-500 mt-0.5 tabular-nums">{Math.round(totals.kcal)}</div>
+                    <div className="w-full h-1 bg-slate-200 rounded mt-auto overflow-hidden">
+                      <div
+                        className={`h-full ${kcalPct > 110 ? 'bg-red-400' : kcalPct < 60 ? 'bg-amber-400' : 'bg-emerald-500'}`}
+                        style={{ width: `${Math.min(kcalPct, 100)}%` }}
+                      />
+                    </div>
+                  </>
+                )}
+              </button>
+            );
+          })}
+        </div>
       </div>
+
       {loading && <div className="text-xs text-slate-400 text-center mt-3">Laden…</div>}
     </div>
   );
@@ -798,7 +871,11 @@ Vraag: ${question}`;
       <div className="bg-slate-50 w-full sm:max-w-2xl sm:rounded-2xl max-h-[95vh] overflow-y-auto">
         <div className="sticky top-0 bg-white border-b px-4 py-3 flex justify-between items-center">
           <h2 className="font-semibold capitalize">{formatDateNL(date)}</h2>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-800 text-xl">×</button>
+          <button
+            onClick={onClose}
+            aria-label="Sluiten"
+            className="min-w-[44px] min-h-[44px] rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 active:bg-slate-200 text-2xl leading-none flex items-center justify-center"
+          >×</button>
         </div>
         <div className="p-4 space-y-4">
           {loading && (
@@ -895,7 +972,7 @@ ${customQ || `Geef een analyse over deze periode: gemiddeldes, trends, sterke en
   }
 
   return (
-    <div className="p-4 space-y-3">
+    <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-3">
       <div className="bg-white rounded-xl p-4 shadow-sm">
         <h2 className="font-semibold text-slate-800 mb-3">Periode-analyse</h2>
         <div className="flex items-center gap-2 mb-3">
@@ -1197,7 +1274,7 @@ function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseCo
   }
 
   return (
-    <div className="p-4 space-y-4 max-w-2xl mx-auto">
+    <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4 max-w-2xl mx-auto w-full">
       {!hideProfile && (
         <div className="bg-white rounded-xl p-4 shadow-sm">
           <div className="flex items-center justify-between mb-3 gap-3">
@@ -1320,6 +1397,124 @@ function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseCo
         <p>De voedingswaarden worden door Claude geschat op basis van kennis van Nederlandse voedingsmiddelen en portiegroottes (NEVO-stijl). Voor echte klinische nauwkeurigheid zou je de NEVO-database van RIVM moeten integreren — die staat niet als open API online en vereist een download.</p>
       </div>
     </div>
+  );
+}
+
+/* ============================================================
+   MOBILE UI: bottom sheet + macro donut
+   ============================================================ */
+function MobileSheet({ onClose, title, children }) {
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    window.addEventListener('keydown', onKey);
+    // lock body scroll while open
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-40 md:hidden" role="dialog" aria-modal="true">
+      <div className="absolute inset-0 bg-black/40 fade-in" onClick={onClose} />
+      <div className="absolute bottom-0 inset-x-0 bg-slate-50 rounded-t-2xl shadow-2xl max-h-[88vh] overflow-hidden flex flex-col sheet-in">
+        <div className="flex justify-center pt-3 pb-1 shrink-0" onClick={onClose}>
+          <div className="w-12 h-1.5 rounded-full bg-slate-300" />
+        </div>
+        <div className="flex items-center justify-between px-4 pb-2 shrink-0">
+          <h3 className="font-semibold text-slate-800">{title || 'Overzicht'}</h3>
+          <button
+            onClick={onClose}
+            aria-label="Sluiten"
+            className="min-w-[44px] min-h-[44px] rounded-lg hover:bg-slate-200 flex items-center justify-center text-slate-500 text-2xl leading-none"
+          >×</button>
+        </div>
+        <div className="flex-1 overflow-y-auto scrollbar-thin px-4 pb-6 safe-pb space-y-3">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MacroDonut({ eiwit = 0, koolhydraten = 0, vet = 0, size = 48, stroke = 6 }) {
+  // kcal contribution per macro
+  const eK = (eiwit || 0) * 4;
+  const kK = (koolhydraten || 0) * 4;
+  const vK = (vet || 0) * 9;
+  const total = eK + kK + vK;
+  const r = (size - stroke) / 2;
+  const C = 2 * Math.PI * r;
+  const segs = total > 0
+    ? [
+        { val: kK / total, color: '#f59e0b' }, // koolhydraten – amber
+        { val: eK / total, color: '#10b981' }, // eiwit – emerald
+        { val: vK / total, color: '#3b82f6' }, // vet – blue
+      ]
+    : [];
+  let offset = 0;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#e5e7eb" strokeWidth={stroke} />
+      {segs.map((s, i) => {
+        const len = s.val * C;
+        const dash = `${len} ${C - len}`;
+        const el = (
+          <circle
+            key={i}
+            cx={size/2} cy={size/2} r={r}
+            fill="none" stroke={s.color} strokeWidth={stroke}
+            strokeDasharray={dash}
+            strokeDashoffset={-offset}
+            strokeLinecap="butt"
+            transform={`rotate(-90 ${size/2} ${size/2})`}
+          />
+        );
+        offset += len;
+        return el;
+      })}
+    </svg>
+  );
+}
+
+function DayListCard({ date, day, targets, onClick }) {
+  const totals = day ? sumEntries(day.entries || []) : null;
+  const count = day?.entries?.length || 0;
+  const kcalPct = totals ? Math.min(100, Math.round((totals.kcal / Math.max(targets.kcal, 1)) * 100)) : 0;
+  const isToday = date === todayISO();
+  const barColor = kcalPct > 110 ? 'bg-red-400' : kcalPct < 60 ? 'bg-amber-400' : 'bg-emerald-500';
+
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full bg-white rounded-xl shadow-sm p-4 flex items-center gap-4 text-left transition hover:bg-emerald-50 active:bg-emerald-100 min-h-[72px] ${isToday ? 'ring-2 ring-emerald-500' : ''}`}
+    >
+      <div className="shrink-0">
+        <MacroDonut eiwit={totals?.eiwit_g || 0} koolhydraten={totals?.koolhydraten_g || 0} vet={totals?.vet_g || 0} size={48} stroke={6} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline justify-between gap-2">
+          <div className="font-semibold text-slate-800 capitalize truncate">
+            {formatDateNL(date)}{isToday && <span className="ml-2 text-xs font-medium text-emerald-600">(vandaag)</span>}
+          </div>
+          <div className="text-xs tabular-nums text-slate-500 shrink-0">{count} {count === 1 ? 'item' : 'items'}</div>
+        </div>
+        {totals ? (
+          <>
+            <div className="text-xs text-slate-600 tabular-nums mt-0.5">
+              {Math.round(totals.kcal || 0)} / {targets.kcal} kcal
+            </div>
+            <div className="w-full h-1.5 bg-slate-200 rounded mt-2 overflow-hidden">
+              <div className={`h-full ${barColor}`} style={{ width: `${Math.min(kcalPct, 100)}%` }} />
+            </div>
+          </>
+        ) : (
+          <div className="text-xs text-slate-400 mt-0.5">Nog niks geregistreerd</div>
+        )}
+      </div>
+    </button>
   );
 }
 
@@ -1674,35 +1869,40 @@ function App() {
     );
   }
 
+  // Mobile bottom sheet voor dagtotalen
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
+  const todayTotals = useMemo(() => sumEntries(today?.entries || []), [today]);
+
   // 4. Main app with active profile
   return (
     <div className="flex flex-col h-screen max-w-3xl mx-auto bg-slate-100">
-      <header className="bg-white border-b px-4 py-3 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 min-w-0">
+      <header className="bg-white border-b px-3 sm:px-4 py-3 flex items-center justify-between gap-2 sm:gap-3 safe-pt">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
           <button
             onClick={() => setActiveProfileId(null)}
             title="Ander profiel kiezen"
-            className="w-10 h-10 shrink-0 rounded-lg bg-slate-100 hover:bg-emerald-100 flex items-center justify-center text-2xl transition"
+            aria-label="Ander profiel kiezen"
+            className="w-11 h-11 shrink-0 rounded-lg bg-slate-100 hover:bg-emerald-100 active:bg-emerald-200 flex items-center justify-center text-2xl transition"
           >
             {activeProfile?.icon || '🙂'}
           </button>
           <div className="min-w-0">
-            <h1 className="font-bold text-slate-800 truncate">{activeProfile?.name || 'Profiel'}</h1>
-            <div className="text-xs text-slate-500 capitalize">{formatDateNL(todayISO())}</div>
+            <h1 className="font-bold text-slate-800 truncate text-base sm:text-lg">{activeProfile?.name || 'Profiel'}</h1>
+            <div className="text-xs text-slate-500 capitalize truncate">{formatDateNL(todayISO())}</div>
           </div>
         </div>
-        <nav className="flex gap-1 text-sm">
-          <button onClick={() => setView('chat')} className={`px-3 py-1.5 rounded-lg ${view==='chat'?'bg-emerald-600 text-white':'hover:bg-slate-200'}`}>Chat</button>
-          <button onClick={() => setView('calendar')} className={`px-3 py-1.5 rounded-lg ${view==='calendar'?'bg-emerald-600 text-white':'hover:bg-slate-200'}`}>Kalender</button>
-          <button onClick={() => setView('week')} className={`px-3 py-1.5 rounded-lg ${view==='week'?'bg-emerald-600 text-white':'hover:bg-slate-200'}`}>Analyse</button>
-          <button onClick={() => setView('settings')} className={`px-3 py-1.5 rounded-lg ${view==='settings'?'bg-emerald-600 text-white':'hover:bg-slate-200'}`}>⚙</button>
+        <nav className="flex gap-0.5 sm:gap-1 text-sm shrink-0">
+          <button onClick={() => setView('chat')} aria-label="Chat" className={`min-h-[44px] min-w-[44px] px-2 sm:px-3 py-1.5 rounded-lg ${view==='chat'?'bg-emerald-600 text-white':'hover:bg-slate-200 active:bg-slate-300'}`}>💬<span className="hidden sm:inline ml-1">Chat</span></button>
+          <button onClick={() => setView('calendar')} aria-label="Kalender" className={`min-h-[44px] min-w-[44px] px-2 sm:px-3 py-1.5 rounded-lg ${view==='calendar'?'bg-emerald-600 text-white':'hover:bg-slate-200 active:bg-slate-300'}`}>📅<span className="hidden sm:inline ml-1">Kalender</span></button>
+          <button onClick={() => setView('week')} aria-label="Analyse" className={`min-h-[44px] min-w-[44px] px-2 sm:px-3 py-1.5 rounded-lg ${view==='week'?'bg-emerald-600 text-white':'hover:bg-slate-200 active:bg-slate-300'}`}>📊<span className="hidden sm:inline ml-1">Analyse</span></button>
+          <button onClick={() => setView('settings')} aria-label="Instellingen" className={`min-h-[44px] min-w-[44px] px-2 sm:px-3 py-1.5 rounded-lg ${view==='settings'?'bg-emerald-600 text-white':'hover:bg-slate-200 active:bg-slate-300'}`}>⚙</button>
         </nav>
       </header>
 
       {saveError && (
         <div className="bg-red-100 text-red-800 text-sm px-4 py-2 border-b border-red-200 flex items-start justify-between gap-3">
           <div>🛑 {saveError}</div>
-          <button onClick={() => setSaveError(null)} className="text-red-600 hover:text-red-900 font-bold">×</button>
+          <button onClick={() => setSaveError(null)} aria-label="Melding sluiten" className="min-w-[44px] min-h-[44px] text-red-600 hover:text-red-900 font-bold text-xl">×</button>
         </div>
       )}
 
@@ -1710,6 +1910,20 @@ function App() {
         {view === 'chat' && (
           <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
             <div className="flex-1 flex flex-col overflow-hidden">
+              {/* Mobiele pill: dagtotalen openen */}
+              <button
+                onClick={() => setMobileSheetOpen(true)}
+                className="md:hidden flex items-center justify-between gap-2 px-4 py-3 bg-white border-b text-sm min-h-[48px] active:bg-slate-50"
+                aria-label="Dagtotalen openen"
+              >
+                <span className="font-medium text-slate-700">Dagtotalen</span>
+                <span className="flex items-center gap-2 text-slate-600 tabular-nums">
+                  <MacroDonut eiwit={todayTotals.eiwit_g||0} koolhydraten={todayTotals.koolhydraten_g||0} vet={todayTotals.vet_g||0} size={24} stroke={3} />
+                  {Math.round(todayTotals.kcal || 0)} / {targets.kcal} kcal
+                  <span className="text-slate-400">↑</span>
+                </span>
+              </button>
+
               <ChatView
                 day={today}
                 onNewEntries={handleNewEntries}
@@ -1721,7 +1935,8 @@ function App() {
                 anthropicKey={anthropicKey}
               />
             </div>
-            <aside className="md:w-80 border-t md:border-t-0 md:border-l bg-slate-50 overflow-y-auto scrollbar-thin p-3 space-y-3">
+            {/* Desktop-only zijbalk */}
+            <aside className="hidden md:block md:w-80 md:border-l bg-slate-50 overflow-y-auto scrollbar-thin p-3 space-y-3">
               <DaySummary day={today} targets={targets} />
               <div>
                 <h3 className="font-semibold text-slate-800 mb-2 text-sm">Items vandaag</h3>
@@ -1731,6 +1946,20 @@ function App() {
                 />
               </div>
             </aside>
+
+            {/* Mobiele bottom sheet met dezelfde content */}
+            {mobileSheetOpen && (
+              <MobileSheet title="Vandaag" onClose={() => setMobileSheetOpen(false)}>
+                <DaySummary day={today} targets={targets} />
+                <div>
+                  <h3 className="font-semibold text-slate-800 mb-2 text-sm">Items vandaag</h3>
+                  <EntriesList
+                    entries={today?.entries}
+                    onDelete={(i) => handleDeleteEntry(todayISO(), i)}
+                  />
+                </div>
+              </MobileSheet>
+            )}
           </div>
         )}
 
