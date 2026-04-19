@@ -229,6 +229,7 @@ Daarin staat strikt geldige JSON met dit schema:
     {
       "naam": "string (NL, bv. 'Bruine boterham met jonge kaas')",
       "hoeveelheid": "string (bv. '1 snee (35 g) + 20 g kaas')",
+      "vervangt_vorige": false,
       "kcal": number, "eiwit_g": number, "vet_g": number,
       "verzadigd_vet_g": number, "koolhydraten_g": number, "suikers_g": number,
       "vezels_g": number, "zout_g": number, "water_ml": number,
@@ -254,11 +255,21 @@ Het veld "datum" bepaalt op welke dag de items geregistreerd worden.
 
 DEDUPLICATIE (zéér belangrijk):
 - Items die je in een eerder antwoord al met status="complete" hebt geretourneerd, zijn door de app definitief opgeslagen.
-- Je HERHAALT deze items NIET in "items" in latere berichten. Ook niet bij een vervolgvraag, herformulering of correctie.
+- Je HERHAALT deze items NIET in "items" in latere berichten, tenzij het gaat om een REVISIE (zie hieronder).
 - Let op de markering "[REEDS GEREGISTREERD: …]" die in je eigen eerdere antwoorden staat — dat zijn de items die al opgeslagen zijn.
-- Ook in de context-blokken "Al geregistreerd vandaag" / "Al geregistreerd op {datum}" zie je wat er al in de database staat. Die items neem je niet opnieuw op in "items".
-- Wil de gebruiker een eerder geregistreerd item aanpassen? Zet dan status="needs_clarification" en zeg vriendelijk in "reply" dat hij het oude item via het ×-knopje in het dagoverzicht kan verwijderen en daarna de juiste versie nog eens kan doorgeven.
-- Alleen items die de gebruiker nú in dit bericht noemt én die nog niet geregistreerd zijn, horen in "items".
+- Ook in de context-blokken "Al geregistreerd vandaag" / "Al geregistreerd op {datum}" zie je wat er al in de database staat.
+- Alleen items die de gebruiker nú in dit bericht noemt én die nog niet geregistreerd zijn, horen in "items" — behalve bij een revisie.
+
+REVISIE van een eerder item (vervangt_vorige):
+- Corrigeert of preciseert de gebruiker een eerder geregistreerd item (bv. "het was 50 g cruesli i.p.v. 40 g", "eigenlijk 200 g yoghurt", "oh, mét melk erin")? Behandel dat als VERVANGING, niet als nieuwe invoer.
+- Emit dan status="complete" met precies ÉÉN item in "items":
+  - "naam": GEBRUIK EXACT DEZELFDE NAAM als het eerder geregistreerde item dat je wilt vervangen (anders kan de app het niet matchen).
+  - "vervangt_vorige": true
+  - "hoeveelheid" en alle voedingswaarden: de nieuwe, gecorrigeerde waarden (volledig, niet alleen het delta).
+  - "datum": dezelfde datum als de oorspronkelijke registratie.
+- De app vervangt dan automatisch de laatste registratie met diezelfde naam op die dag. Er ontstaan geen duplicaten.
+- Alleen als het écht een nieuw item is (ander gerecht, ander moment van de dag), zet je "vervangt_vorige": false of laat je het veld weg.
+- Bij twijfel ("is dit een tweede portie of een correctie?") vraag je het kort na met status="needs_clarification".
 `;
 
 const ANALYSIS_SYSTEM = `Je bent een voedingscoach die op basis van geregistreerde dagtotalen korte, inzichtvolle analyses geeft.
@@ -1695,9 +1706,36 @@ function App() {
       });
   }, [fb, activeProfileId, selectedDate, today]);
 
+  // Merge nieuwe items in bestaande entries. Items met vervangt_vorige:true
+  // vervangen de meest recente entry op dezelfde dag met dezelfde (genormaliseerde)
+  // naam. Valt er niks te vervangen, dan wordt het alsnog toegevoegd.
+  function mergeEntries(existing, incoming) {
+    const norm = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const out = [...existing];
+    for (const raw of incoming) {
+      const { vervangt_vorige, ...item } = raw;
+      const stamped = { ...item, ts: Date.now() };
+      if (vervangt_vorige) {
+        // Zoek van achter naar voren de laatste match op naam
+        const target = norm(item.naam);
+        let replaced = false;
+        for (let i = out.length - 1; i >= 0; i--) {
+          if (norm(out[i].naam) === target) {
+            out[i] = stamped;
+            replaced = true;
+            break;
+          }
+        }
+        if (!replaced) out.push(stamped); // fallback: alsnog toevoegen
+      } else {
+        out.push(stamped);
+      }
+    }
+    return out;
+  }
+
   async function handleNewEntries(items, targetDate) {
     const date = targetDate || todayISO();
-    const stamped = items.map(i => ({ ...i, ts: Date.now() }));
 
     if (!fb || !activeProfileId) {
       setSaveError('Niet opgeslagen: geen actief profiel of Firebase niet verbonden.');
@@ -1706,7 +1744,7 @@ function App() {
 
     if (date === todayISO()) {
       // Vandaag: update lokaal today-state direct voor snelle UI-feedback
-      const newEntries = [...(today?.entries || []), ...stamped];
+      const newEntries = mergeEntries(today?.entries || [], items);
       setToday({ ...(today || {}), entries: newEntries });
       try {
         await saveDay(fb, activeProfileId, date, { entries: newEntries });
@@ -1718,10 +1756,10 @@ function App() {
       return;
     }
 
-    // Andere dag: laad die dag, append, sla op
+    // Andere dag: laad die dag, merge, sla op
     try {
       const existing = (await loadDay(fb, activeProfileId, date)) || { entries: [] };
-      const newEntries = [...(existing.entries || []), ...stamped];
+      const newEntries = mergeEntries(existing.entries || [], items);
       await saveDay(fb, activeProfileId, date, { entries: newEntries });
       // Als deze dag op dat moment open is in het detailmodaal: update dat óók
       if (selectedDate === date) {
