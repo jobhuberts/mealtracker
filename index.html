@@ -103,6 +103,21 @@ const LS_KEYS = {
   activeProfileId: 'mt_active_profile_id',
 };
 
+// Baked-in Firebase config — zodat nieuwe bezoekers niks hoeven in te stellen.
+// Veilig om publiek te delen: de beveiliging van Firestore leunt op rules +
+// Authorized domains, niet op geheim-houden van deze config.
+// Gebruikers kunnen hem via Settings alsnog overriden (dat heeft voorrang).
+// Zet op null om de handmatige invoer af te dwingen.
+const DEFAULT_FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAhSYT6IOyc0tfPRxgjTnsN6-gqaAXIntk",
+  authDomain: "mealtracker-d5197.firebaseapp.com",
+  projectId: "mealtracker-d5197",
+  storageBucket: "mealtracker-d5197.firebasestorage.app",
+  messagingSenderId: "268371156962",
+  appId: "1:268371156962:web:a7e2c1b0fcfe948f6d63bb",
+  measurementId: "G-8H5LW47XDG"
+};
+
 const EMOJI_ICONS = ['🦊','🐼','🦁','🐨','🐸','🦉','🐙','🦄','🐯','🐵','🐧','🐰','🦒','🐻','🐳','🦩','🐝','🐢','🦕','🐱','🐶','🐷','🦔','🐔','🦖','🦚','🐲','🐻‍❄️'];
 
 const DEFAULT_PROFILE = {
@@ -1500,11 +1515,14 @@ function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseCo
         />
       </div>
 
-      <div className="bg-white rounded-xl p-4 shadow-sm">
-        <h2 className="font-semibold text-slate-800 mb-2">Firebase config</h2>
-        <p className="text-xs text-slate-500 mb-2">
-          Plak de <code>firebaseConfig</code> JSON uit je Firebase-project-instellingen (Project settings → General → Your apps → Web app → SDK setup → Config).
-          Zet ook <b>Anonymous auth</b> en <b>Firestore</b> aan in je Firebase-project.
+      <details className="bg-white rounded-xl p-4 shadow-sm group">
+        <summary className="font-semibold text-slate-800 cursor-pointer flex items-center justify-between">
+          <span>Firebase config <span className="text-xs font-normal text-emerald-700 ml-1">✓ voorgebakken</span></span>
+          <span className="text-xs text-slate-400 group-open:hidden">klik om aan te passen</span>
+        </summary>
+        <p className="text-xs text-slate-500 mt-3 mb-2">
+          De app heeft een standaard Firebase-config ingebouwd, dus dit hoef je normaal niet aan te raken.
+          Alleen nodig als je 'm naar een ander Firebase-project wilt wijzen.
         </p>
         <textarea
           rows={8}
@@ -1533,7 +1551,7 @@ function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseCo
             {testResult.msg}
           </div>
         )}
-      </div>
+      </details>
 
       <div className="bg-white rounded-xl p-4 shadow-sm text-xs text-slate-500 leading-relaxed">
         <p className="font-semibold text-slate-700 mb-1">Over voedingswaarden</p>
@@ -1667,8 +1685,11 @@ function DayListCard({ date, day, targets, onClick }) {
 function App() {
   const [anthropicKey, setAnthropicKeyState] = useState(() => localStorage.getItem(LS_KEYS.anthropicKey) || '');
   const [firebaseConfig, setFirebaseConfigState] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(LS_KEYS.firebaseConfig) || 'null'); }
-    catch { return null; }
+    try {
+      const stored = JSON.parse(localStorage.getItem(LS_KEYS.firebaseConfig) || 'null');
+      return stored || DEFAULT_FIREBASE_CONFIG;
+    }
+    catch { return DEFAULT_FIREBASE_CONFIG; }
   });
   const [activeProfileId, setActiveProfileIdState] = useState(() => localStorage.getItem(LS_KEYS.activeProfileId) || null);
 
@@ -1937,12 +1958,15 @@ function App() {
       : uid
         ? 'connected'
         : `verbinden… (${fbPhase})`;
-  const needsConfig = !firebaseConfig || !anthropicKey;
+  const needsConfig = !anthropicKey || !firebaseConfig;
 
   // ----- Startup screens: config gate + profile picker -----
 
-  // 1. Missing API key / Firebase config → force Settings screen
+  // 1. Missing API key (of onverhoopt geen Firebase config) → force Settings screen
   if (needsConfig) {
+    const missing = [];
+    if (!anthropicKey) missing.push('Anthropic API key');
+    if (!firebaseConfig) missing.push('Firebase config');
     return (
       <div className="flex flex-col h-dvh max-w-3xl mx-auto bg-slate-100">
         <header className="bg-white border-b px-4 py-3">
@@ -1950,7 +1974,7 @@ function App() {
           <div className="text-xs text-slate-500">Eerst even instellen…</div>
         </header>
         <div className="bg-amber-100 text-amber-800 text-sm px-4 py-2 border-b border-amber-200">
-          ⚠ Vul je Anthropic API key en Firebase config in om te beginnen.
+          ⚠ Vul je {missing.join(' en ')} in om te beginnen.
         </div>
         <main className="flex-1 overflow-y-auto">
           <Settings
