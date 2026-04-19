@@ -1,4 +1,4 @@
-# Meal Tracker
+# Bordwijzer
 
 Conversationele maaltijdregistratie met Claude en Firebase. Eén HTML-bestand, geen build-stap.
 

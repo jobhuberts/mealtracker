@@ -1,4 +1,4 @@
-# Maaltijd Tracker — setup
+# Bordwijzer — setup
 
 Eén HTML-bestand dat je direct vanuit Finder kunt dubbelklikken. Geen build-stap.
 

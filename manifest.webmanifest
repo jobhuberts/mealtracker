@@ -1,6 +1,6 @@
 {
-  "name": "Maaltijd Tracker",
-  "short_name": "Maaltijden",
+  "name": "Bordwijzer",
+  "short_name": "Bordwijzer",
   "description": "Conversationele maaltijdregistratie met Claude.",
   "display": "standalone",
   "orientation": "portrait",
