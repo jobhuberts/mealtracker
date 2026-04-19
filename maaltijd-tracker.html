@@ -55,19 +55,30 @@
   .min-h-dvh { min-height: 100dvh; min-height: 100vh; }
   .min-h-dvh { min-height: 100dvh; }
 
-  /* Respect iPhone safe-area insets (home indicator, notch) */
-  .safe-pb { padding-bottom: max(env(safe-area-inset-bottom), 0.75rem); }
-  .safe-pt { padding-top: max(env(safe-area-inset-top), 0rem); }
+  /* Respect iPhone safe-area insets (home indicator, notch).
+     !important zodat deze winnen van Tailwind's p-3 / py-3 die via de CDN
+     ná onze <style> geïnjecteerd wordt. Zonder dit valt de chat-input in
+     de geïnstalleerde PWA achter de homebar. */
+  .safe-pb { padding-bottom: max(env(safe-area-inset-bottom), 0.75rem) !important; }
+  .safe-pt { padding-top: max(env(safe-area-inset-top), 0rem) !important; }
 
   /* Extra bottom room voor de chat-input op mobiel zodat 'ie boven
      de iOS-homebar en het keyboard-verwerkingsgebied uitkomt */
   .chat-input-pb {
-    padding-bottom: max(env(safe-area-inset-bottom), 0.75rem);
+    padding-bottom: max(env(safe-area-inset-bottom), 0.75rem) !important;
   }
   @media (max-width: 767px) {
     .chat-input-pb {
-      padding-bottom: calc(max(env(safe-area-inset-bottom), 0.75rem) + 1rem);
+      padding-bottom: calc(max(env(safe-area-inset-bottom), 0.75rem) + 0.75rem) !important;
     }
+  }
+
+  /* Standalone PWA (homescreen-app) op iOS: de homebar vreet ~34px aan
+     de onderkant. Geef het hele app-root-frame een bodem-padding
+     zodat de chat-input altijd boven de homebar eindigt, ook als het
+     toetsenbord open is. */
+  @media (display-mode: standalone) {
+    .standalone-pb { padding-bottom: env(safe-area-inset-bottom); }
   }
 
   /* Bottom sheet slide-up animation */
