@@ -223,6 +223,35 @@ function sumEntries(entries) {
   return totals;
 }
 
+// Resize foto naar max 1280px en converteer naar JPEG ~85%, zodat we niet
+// 5 MB+ via de Claude API gooien. Output: { base64, mediaType, dataUrl }.
+async function compressImage(file, maxDim = 1280, quality = 0.85) {
+  const dataUrl = await new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result);
+    fr.onerror = () => rej(new Error('Kon bestand niet lezen'));
+    fr.readAsDataURL(file);
+  });
+  const img = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => rej(new Error('Kon afbeelding niet decoderen'));
+    i.src = dataUrl;
+  });
+  const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+  const w = Math.round(img.width * scale);
+  const h = Math.round(img.height * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+  const jpegDataUrl = canvas.toDataURL('image/jpeg', quality);
+  return {
+    base64: jpegDataUrl.split(',')[1],
+    mediaType: 'image/jpeg',
+    dataUrl: jpegDataUrl,
+  };
+}
+
 /* ============================================================
    CLAUDE API CLIENT (browser)
    ============================================================ */
@@ -292,6 +321,15 @@ REVISIE van een eerder item (vervangt_vorige):
 - De app vervangt dan automatisch de laatste registratie met diezelfde naam op die dag. Er ontstaan geen duplicaten.
 - Alleen als het écht een nieuw item is (ander gerecht, ander moment van de dag), zet je "vervangt_vorige": false of laat je het veld weg.
 - Bij twijfel ("is dit een tweede portie of een correctie?") vraag je het kort na met status="needs_clarification".
+
+FOTO-INVOER (etiket scannen):
+- Komt er een foto mee in het bericht? Dat is vrijwel altijd een voedingswaarde-etiket (NL verpakking, "Voedingswaarden per 100 g/ml" en/of "per portie").
+- Lees zo nauwkeurig mogelijk: productnaam/merk, portiegrootte (zoals vermeld), kcal en macro's/micro's.
+- CRUCIAAL: het etiket geeft waarden per 100 g of per portie — NIET wat de gebruiker daadwerkelijk gegeten heeft.
+- Tenzij de gebruiker bij de foto al een hoeveelheid noemt ("de hele zak op", "50 g ervan"): status="needs_clarification". In "reply" benoem je kort wat je leest (bv. "Albert Heijn cruesli, 471 kcal per 100 g — hoeveel had je?") en vraag je om de portie.
+- Noemt de gebruiker de hoeveelheid wel: bereken de waarden voor die hoeveelheid (schaal alle voedingswaarden proportioneel) en emit status="complete".
+- Onleesbaar, scheef, vaag, of geen etiket op de foto? Vraag vriendelijk om een duidelijker foto of een tekstuele beschrijving.
+- Is het een foto van een gerecht (niet van een etiket)? Schat op basis van wat je ziet en vraag zo nodig om portiegrootte.
 `;
 
 const ANALYSIS_SYSTEM = `Je bent een voedingscoach die op basis van geregistreerde dagtotalen korte, inzichtvolle analyses geeft.
@@ -605,20 +643,52 @@ function ChatView({ day, onNewEntries, onMessage, targets, profile, history, set
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
+  const [image, setImage] = useState(null); // { base64, mediaType, dataUrl } | null
+  const [imageBusy, setImageBusy] = useState(false);
   const scrollRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [history, sending]);
 
+  async function handleImagePick(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // zelfde bestand opnieuw kunnen kiezen
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setError('Dat is geen afbeelding.');
+      return;
+    }
+    setError(null);
+    setImageBusy(true);
+    try {
+      const compressed = await compressImage(file);
+      setImage(compressed);
+    } catch (err) {
+      console.error(err);
+      setError('Kon foto niet verwerken: ' + (err.message || err));
+    } finally {
+      setImageBusy(false);
+    }
+  }
+
   async function send() {
-    if (!input.trim() || sending) return;
+    if ((!input.trim() && !image) || sending) return;
     if (!anthropicKey) { setError('Vul eerst je Anthropic API key in via Instellingen.'); return; }
     const userText = input.trim();
+    const sentImage = image;
     setInput('');
+    setImage(null);
     setError(null);
 
-    const newHistory = [...history, { role: 'user', content: userText, ts: Date.now() }];
+    const userMsg = {
+      role: 'user',
+      content: userText || (sentImage ? '📷 Foto van etiket' : ''),
+      ts: Date.now(),
+      imagePreview: sentImage ? sentImage.dataUrl : null,
+    };
+    const newHistory = [...history, userMsg];
     setHistory(newHistory);
     setSending(true);
 
@@ -636,7 +706,7 @@ Al geregistreerd vandaag:
 ${todayEntries || '(nog niks)'}
 
 Nieuwe input van gebruiker:
-${userText}`;
+${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}`;
 
       // Bouw messages voor Claude (alleen laatste paar user/assistant).
       // Belangrijk: bij assistant-berichten plakken we een "[REEDS GEREGISTREERD: …]"
@@ -646,7 +716,18 @@ ${userText}`;
       const tail = newHistory.slice(-8);
       for (const m of tail) {
         if (m.role === 'user' && m === tail[tail.length - 1]) {
-          claudeMessages.push({ role: 'user', content: contextMsg });
+          // Laatste user-message: als er een foto bij hoort, multimodale content.
+          if (sentImage) {
+            claudeMessages.push({
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: sentImage.mediaType, data: sentImage.base64 } },
+                { type: 'text', text: contextMsg },
+              ],
+            });
+          } else {
+            claudeMessages.push({ role: 'user', content: contextMsg });
+          }
         } else if (m.role === 'assistant' && m.mealData && Array.isArray(m.mealData.items) && m.mealData.items.length) {
           const d = m.mealData.datum || todayISO();
           const summary = m.mealData.items
@@ -710,6 +791,13 @@ ${userText}`;
                 ? 'bg-emerald-600 text-white rounded-br-sm'
                 : 'bg-white text-slate-800 rounded-bl-sm shadow-sm'
             }`}>
+              {m.imagePreview && (
+                <img
+                  src={m.imagePreview}
+                  alt="Bijgevoegde foto"
+                  className="mb-1.5 rounded-lg max-h-48 w-auto"
+                />
+              )}
               {m.content}
               {m.mealData && m.mealData.items && m.mealData.items.length > 0 && (() => {
                 const dateLabel = (() => {
@@ -743,7 +831,45 @@ ${userText}`;
         )}
       </div>
       <div className="border-t bg-white p-3 chat-input-pb">
+        {image && (
+          <div className="mb-2 flex items-center gap-2">
+            <div className="relative inline-block">
+              <img
+                src={image.dataUrl}
+                alt="Foto van etiket"
+                className="h-16 w-16 object-cover rounded-lg border border-slate-200"
+              />
+              <button
+                type="button"
+                onClick={() => setImage(null)}
+                aria-label="Foto verwijderen"
+                className="absolute -top-1.5 -right-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded-full w-5 h-5 text-xs leading-none flex items-center justify-center shadow"
+              >
+                ×
+              </button>
+            </div>
+            <span className="text-xs text-slate-500">Etiket bijgevoegd — voeg eventueel hoeveelheid toe in tekst.</span>
+          </div>
+        )}
         <div className="flex gap-2 items-end">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={handleImagePick}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={imageBusy || sending}
+            aria-label="Etiket scannen met camera"
+            title="Etiket scannen"
+            className="bg-white border border-slate-300 hover:bg-slate-50 active:bg-slate-100 disabled:opacity-50 text-slate-700 rounded-lg px-3 py-2 text-lg min-h-[48px] min-w-[48px] flex items-center justify-center"
+          >
+            {imageBusy ? '…' : '📷'}
+          </button>
           <textarea
             value={input}
             onChange={e => setInput(e.target.value)}
@@ -751,12 +877,12 @@ ${userText}`;
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
             }}
             rows={2}
-            placeholder="Typ wat je gegeten hebt…"
+            placeholder={image ? 'Optioneel: hoeveel heb je ervan gegeten?' : 'Typ wat je gegeten hebt…'}
             className="flex-1 border rounded-lg px-3 py-2 text-base sm:text-sm min-h-[48px] focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none"
           />
           <button
             onClick={send}
-            disabled={sending || !input.trim()}
+            disabled={sending || (!input.trim() && !image)}
             aria-label="Verstuur bericht"
             className="bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:bg-slate-300 text-white rounded-lg px-4 sm:px-4 py-2 text-sm font-medium min-h-[48px] min-w-[72px]"
           >
