@@ -952,6 +952,8 @@ function CalendarView({ fb, profileId, targets, onSelectDate }) {
 
   return (
     <div className="flex-1 overflow-y-auto scrollbar-thin p-3 sm:p-4">
+      <MacroLegend />
+
       <div className="flex justify-between items-center mb-4 gap-2">
         <button
           onClick={prev}
@@ -965,8 +967,6 @@ function CalendarView({ fb, profileId, targets, onSelectDate }) {
           className="min-w-[44px] min-h-[44px] px-3 rounded-lg hover:bg-slate-200 active:bg-slate-300 text-lg"
         >→</button>
       </div>
-
-      <MacroLegend />
 
       {/* Mobiele lijst (tot md) */}
       <div className="md:hidden space-y-2">
@@ -998,8 +998,25 @@ function CalendarView({ fb, profileId, targets, onSelectDate }) {
             if (!c) return <div key={i} />;
             const day = days[c.iso];
             const totals = day ? sumEntries(day.entries) : null;
-            const kcalPct = totals ? Math.min(100, Math.round((totals.kcal / targets.kcal) * 100)) : 0;
+            const kcalPctRaw = totals ? Math.round((totals.kcal / Math.max(targets.kcal, 1)) * 100) : 0;
+            const kcalPct = Math.min(100, kcalPctRaw);
+            const overshoot = kcalPctRaw > 110;
             const isToday = c.iso === todayISO();
+
+            // Macro-kcal aandelen voor de gestapelde balk
+            let kSeg = 0, eSeg = 0, vSeg = 0;
+            if (totals) {
+              const kK = (totals.koolhydraten_g || 0) * 4;
+              const eK = (totals.eiwit_g || 0) * 4;
+              const vK = (totals.vet_g || 0) * 9;
+              const tot = kK + eK + vK;
+              if (tot > 0) {
+                kSeg = (kK / tot) * 100;
+                eSeg = (eK / tot) * 100;
+                vSeg = 100 - kSeg - eSeg; // restje t.b.v. afrondingsfout
+              }
+            }
+
             return (
               <button
                 key={i}
@@ -1011,12 +1028,18 @@ function CalendarView({ fb, profileId, targets, onSelectDate }) {
                 <div className="font-medium text-slate-700">{c.d}</div>
                 {totals && (
                   <>
-                    <div className="text-[10px] text-slate-500 mt-0.5 tabular-nums">{Math.round(totals.kcal)}</div>
-                    <div className="w-full h-1 bg-slate-200 rounded mt-auto overflow-hidden">
-                      <div
-                        className={`h-full ${kcalPct > 110 ? 'bg-red-400' : kcalPct < 60 ? 'bg-amber-400' : 'bg-emerald-500'}`}
-                        style={{ width: `${Math.min(kcalPct, 100)}%` }}
-                      />
+                    <div className={`text-[10px] mt-0.5 tabular-nums ${overshoot ? 'text-red-500 font-medium' : 'text-slate-500'}`}>
+                      {Math.round(totals.kcal)}
+                    </div>
+                    <div
+                      className="w-full h-1.5 bg-slate-200 rounded mt-auto overflow-hidden"
+                      title={`${Math.round(totals.kcal)} / ${targets.kcal} kcal · KH ${Math.round(kSeg)}% · E ${Math.round(eSeg)}% · V ${Math.round(vSeg)}%`}
+                    >
+                      <div className="h-full flex" style={{ width: `${kcalPct}%` }}>
+                        <div className="h-full bg-amber-500" style={{ width: `${kSeg}%` }} />
+                        <div className="h-full bg-emerald-500" style={{ width: `${eSeg}%` }} />
+                        <div className="h-full bg-blue-500" style={{ width: `${vSeg}%` }} />
+                      </div>
                     </div>
                   </>
                 )}
