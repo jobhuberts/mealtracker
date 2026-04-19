@@ -966,6 +966,8 @@ function CalendarView({ fb, profileId, targets, onSelectDate }) {
         >→</button>
       </div>
 
+      <MacroLegend />
+
       {/* Mobiele lijst (tot md) */}
       <div className="md:hidden space-y-2">
         {listDays.length === 0 && !loading && (
@@ -1732,6 +1734,28 @@ function MobileSheet({ onClose, title, children }) {
         <div className="flex-1 overflow-y-auto scrollbar-thin px-4 pb-6 safe-pb space-y-3">
           {children}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function MacroLegend() {
+  return (
+    <div className="bg-white rounded-xl shadow-sm px-3 py-2.5 mb-3 text-xs sm:text-sm text-slate-600">
+      <div className="font-medium text-slate-700 mb-1.5">Macroverdeling van je calorieën</div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-full bg-amber-500" />
+          Koolhydraten <span className="text-slate-400">45–55%</span>
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500" />
+          Eiwit <span className="text-slate-400">15–25%</span>
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block w-2.5 h-2.5 rounded-full bg-blue-500" />
+          Vet <span className="text-slate-400">25–35%</span>
+        </span>
       </div>
     </div>
   );
