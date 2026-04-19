@@ -114,17 +114,24 @@ const DEFAULT_PROFILE = {
   heightCm: 170,
   activity: 'matig',     // laag | matig | hoog
   goal: 'onderhoud',     // afvallen | onderhoud | aankomen
+  customKcal: null,      // null = automatisch (Mifflin-St Jeor); getal = handmatig kcal-doel
 };
 
-// Richtlijnen (Gezondheidsraad / Voedingscentrum, grove benadering)
-function calcDailyTargets(p) {
-  // BMR (Mifflin-St Jeor)
+// Automatische berekening op basis van Mifflin–St Jeor (zonder override)
+function calcAutoKcal(p) {
   const s = p.gender === 'm' ? 5 : -161;
   const bmr = 10 * p.weightKg + 6.25 * p.heightCm - 5 * p.age + s;
   const actMap = { laag: 1.4, matig: 1.65, hoog: 1.9 };
   const tdee = bmr * (actMap[p.activity] || 1.65);
   const goalAdj = p.goal === 'afvallen' ? -400 : p.goal === 'aankomen' ? 300 : 0;
-  const kcal = Math.round(tdee + goalAdj);
+  return Math.round(tdee + goalAdj);
+}
+
+// Richtlijnen (Gezondheidsraad / Voedingscentrum, grove benadering)
+function calcDailyTargets(p) {
+  const autoKcal = calcAutoKcal(p);
+  const useCustom = typeof p.customKcal === 'number' && isFinite(p.customKcal) && p.customKcal > 0;
+  const kcal = useCustom ? Math.round(p.customKcal) : autoKcal;
 
   return {
     kcal,
@@ -1214,6 +1221,53 @@ function ProfileEditor({ initial, isFirstProfile, legacyDayCount, onSave, onCanc
             </label>
           </div>
 
+          <div className="border-t border-slate-700 pt-4 space-y-2">
+            <span className="text-slate-300 text-sm font-medium">Kcal-doel</span>
+            <div className="space-y-2">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="radio"
+                  name="kcalMode"
+                  checked={p.customKcal == null}
+                  onChange={() => setP({ ...p, customKcal: null })}
+                  className="mt-1"
+                />
+                <span className="text-sm text-slate-200">
+                  Automatisch berekenen
+                  <span className="block text-xs text-slate-400">
+                    Op basis van leeftijd, gewicht, lengte, beweging en doel — {calcAutoKcal(p)} kcal
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="radio"
+                  name="kcalMode"
+                  checked={p.customKcal != null}
+                  onChange={() => setP({ ...p, customKcal: p.customKcal ?? calcAutoKcal(p) })}
+                  className="mt-1"
+                />
+                <span className="text-sm text-slate-200 flex-1">
+                  Zelf instellen
+                  {p.customKcal != null && (
+                    <span className="flex items-center gap-2 mt-1">
+                      <input
+                        type="number"
+                        min="500"
+                        max="8000"
+                        step="50"
+                        value={p.customKcal}
+                        onChange={e => setP({ ...p, customKcal: +e.target.value })}
+                        className="w-28 bg-slate-900 text-white border border-slate-700 rounded px-3 py-2 focus:outline-none focus:border-emerald-500"
+                      />
+                      <span className="text-slate-400 text-xs">kcal per dag</span>
+                    </span>
+                  )}
+                </span>
+              </label>
+            </div>
+          </div>
+
           {isFirstProfile && legacyDayCount > 0 && (
             <label className="flex items-start gap-3 bg-emerald-900/30 border border-emerald-800 rounded-lg p-3 cursor-pointer">
               <input
@@ -1373,6 +1427,53 @@ function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseCo
                 <option value="aankomen">Aankomen</option>
               </select>
             </label>
+          </div>
+
+          <div className="border-t mt-4 pt-3 space-y-2">
+            <span className="text-slate-700 text-sm font-medium">Kcal-doel</span>
+            <div className="space-y-2 text-sm">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="kcalModeSettings"
+                  checked={profile.customKcal == null}
+                  onChange={() => setProfile({ ...profile, customKcal: null })}
+                  className="mt-1"
+                />
+                <span className="text-slate-700">
+                  Automatisch berekenen
+                  <span className="block text-xs text-slate-500">
+                    Op basis van profielgegevens — {calcAutoKcal(profile)} kcal
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="kcalModeSettings"
+                  checked={profile.customKcal != null}
+                  onChange={() => setProfile({ ...profile, customKcal: profile.customKcal ?? calcAutoKcal(profile) })}
+                  className="mt-1"
+                />
+                <span className="text-slate-700 flex-1">
+                  Zelf instellen
+                  {profile.customKcal != null && (
+                    <span className="flex items-center gap-2 mt-1">
+                      <input
+                        type="number"
+                        min="500"
+                        max="8000"
+                        step="50"
+                        value={profile.customKcal}
+                        onChange={e => setProfile({ ...profile, customKcal: +e.target.value })}
+                        className="w-24 border rounded px-2 py-1"
+                      />
+                      <span className="text-slate-500 text-xs">kcal per dag</span>
+                    </span>
+                  )}
+                </span>
+              </label>
+            </div>
           </div>
         </div>
       )}
