@@ -263,6 +263,32 @@ async function compressImage(file, maxDim = 1280, quality = 0.85) {
   };
 }
 
+// Vind alle URLs in een stukje tekst. Trailing leestekens worden afgekapt
+// zodat "...link: https://foo.bar/baz." niet de punt meeneemt.
+function extractUrls(text) {
+  if (!text) return [];
+  const re = /https?:\/\/[^\s<>"'()]+/gi;
+  const raw = text.match(re) || [];
+  return raw.map(u => u.replace(/[.,;:!?)\]}>]+$/, ''));
+}
+
+// Haal een webpagina op als opgeschoonde markdown via r.jina.ai.
+// Dat is een gratis publieke service die CORS toelaat en HTML → markdown
+// converteert. Resultaat wordt afgekapt op maxChars zodat we niet
+// megabytes aan pagina-tekst naar Claude sturen.
+async function fetchPageAsMarkdown(url, maxChars = 15000) {
+  const endpoint = 'https://r.jina.ai/' + url;
+  const res = await fetch(endpoint, {
+    headers: { 'Accept': 'text/plain' },
+  });
+  if (!res.ok) throw new Error(`Kon recept-pagina niet ophalen (${res.status}): ${url}`);
+  let text = await res.text();
+  if (text.length > maxChars) {
+    text = text.slice(0, maxChars) + '\n\n[…afgekapt bij ' + maxChars + ' tekens…]';
+  }
+  return text;
+}
+
 /* ============================================================
    CLAUDE API CLIENT (browser)
    ============================================================ */
@@ -341,6 +367,18 @@ FOTO-INVOER (etiket scannen):
 - Noemt de gebruiker de hoeveelheid wel: bereken de waarden voor die hoeveelheid (schaal alle voedingswaarden proportioneel) en emit status="complete".
 - Onleesbaar, scheef, vaag, of geen etiket op de foto? Vraag vriendelijk om een duidelijker foto of een tekstuele beschrijving.
 - Is het een foto van een gerecht (niet van een etiket)? Schat op basis van wat je ziet en vraag zo nodig om portiegrootte.
+
+RECEPT-LINK VERWERKEN:
+- Stuurt de gebruiker een link (bv. ah.nl/allerhande, leukerecepten.nl, jamieoliver.com, eigen blog)? De app haalt de pagina al voor je op en zet 'm in het bericht onder het kopje "[RECEPT-CONTENT <url>]".
+- Taak: haal uit de recept-tekst (a) de naam van het gerecht, (b) het aantal porties waarvoor het recept geschreven is, (c) de volledige ingrediëntenlijst met hoeveelheden.
+- Bereken de voedingswaarden voor ÉÉN portie van het recept (som alle ingrediënten, deel door aantal porties uit het recept).
+- Vraag dan hoeveel porties de gebruiker daadwerkelijk heeft gegeten — tenzij dat al in het bericht staat. Gebruik status="needs_clarification".
+- Zodra je weet hoeveel porties de gebruiker heeft gegeten: status="complete" met ÉÉN item:
+  - "naam": gerechtnaam + portie-aanduiding, bv. "Enchiladas met kidneybonenchili (1,5 porties)".
+  - "hoeveelheid": kort (bv. "1,5 porties van 4-persoons recept").
+  - kcal en macro's/micro's: de waarden voor dat aantal porties (geschaald).
+- Is de ingrediëntenlijst onvindbaar of onleesbaar op de opgehaalde pagina? Zeg dat eerlijk en vraag de gebruiker om de ingrediënten kort te plakken.
+- Negeer reclame, "Ook lekker"-secties, commentaren en andere ruis rondom het recept.
 `;
 
 const ANALYSIS_SYSTEM = `Je bent een voedingscoach die op basis van geregistreerde dagtotalen korte, inzichtvolle analyses geeft.
@@ -656,6 +694,7 @@ function ChatView({ day, onNewEntries, onMessage, targets, profile, history, set
   const [error, setError] = useState(null);
   const [image, setImage] = useState(null); // { base64, mediaType, dataUrl } | null
   const [imageBusy, setImageBusy] = useState(false);
+  const [recipeBusy, setRecipeBusy] = useState(false);
   const scrollRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -704,6 +743,27 @@ function ChatView({ day, onNewEntries, onMessage, targets, profile, history, set
     setSending(true);
 
     try {
+      // Recept-URLs in het bericht detecteren en opschonen naar markdown via r.jina.ai
+      const urls = extractUrls(userText);
+      let recipeBlocks = '';
+      if (urls.length > 0) {
+        setRecipeBusy(true);
+        try {
+          const fetched = await Promise.all(urls.map(async u => {
+            try {
+              const md = await fetchPageAsMarkdown(u);
+              return `\n\n[RECEPT-CONTENT ${u}]\n${md}`;
+            } catch (err) {
+              console.warn('Kon pagina niet ophalen', u, err);
+              return `\n\n[RECEPT-CONTENT ${u}]\n(kon pagina niet ophalen: ${err.message || err})`;
+            }
+          }));
+          recipeBlocks = fetched.join('');
+        } finally {
+          setRecipeBusy(false);
+        }
+      }
+
       // Context voor Claude
       const todayEntries = (day?.entries || []).map(e =>
         `- ${e.naam} (${e.hoeveelheid}) — ${Math.round(e.kcal)} kcal`
@@ -717,7 +777,7 @@ Al geregistreerd vandaag:
 ${todayEntries || '(nog niks)'}
 
 Nieuwe input van gebruiker:
-${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}`;
+${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}${recipeBlocks}`;
 
       // Bouw messages voor Claude (alleen laatste paar user/assistant).
       // Belangrijk: bij assistant-berichten plakken we een "[REEDS GEREGISTREERD: …]"
@@ -833,7 +893,9 @@ ${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}`;
         {sending && (
           <div className="flex justify-start">
             <div className="bg-white text-slate-500 rounded-2xl px-4 py-2.5 text-sm shadow-sm">
-              <span className="inline-block animate-pulse">Claude denkt na…</span>
+              <span className="inline-block animate-pulse">
+                {recipeBusy ? '📖 Recept ophalen…' : 'Claude denkt na…'}
+              </span>
             </div>
           </div>
         )}
