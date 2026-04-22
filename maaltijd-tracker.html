@@ -141,6 +141,7 @@ const DEFAULT_PROFILE = {
   activity: 'matig',     // laag | matig | hoog
   goal: 'onderhoud',     // afvallen | onderhoud | aankomen
   customKcal: null,      // null = automatisch (Mifflin-St Jeor); getal = handmatig kcal-doel
+  remembered: [],        // persistente lijst met voedingspatronen die Claude onthoudt (strings)
 };
 
 // Automatische berekening op basis van Mifflin–St Jeor (zonder override)
@@ -325,7 +326,8 @@ Daarin staat strikt geldige JSON met dit schema:
       "kalium_mg": number, "vitC_mg": number, "vitD_ug": number,
       "vitB12_ug": number, "foliumzuur_ug": number
     }
-  ]
+  ],
+  "remember": ["string — optioneel, zie GEHEUGEN"]
 }
 
 - Bij status "needs_clarification": items mag leeg zijn en "reply" bevat je vervolgvraag.
@@ -379,6 +381,17 @@ RECEPT-LINK VERWERKEN:
   - kcal en macro's/micro's: de waarden voor dat aantal porties (geschaald).
 - Is de ingrediëntenlijst onvindbaar of onleesbaar op de opgehaalde pagina? Zeg dat eerlijk en vraag de gebruiker om de ingrediënten kort te plakken.
 - Negeer reclame, "Ook lekker"-secties, commentaren en andere ruis rondom het recept.
+
+GEHEUGEN (remember):
+- Je krijgt in de context-blokken een sectie "Wat Claude onthoudt van eerder" met persistente voedingspatronen van de gebruiker (bv. "eet altijd halfvolle yoghurt van Campina", "drinkt 's avonds meestal 1 glas rode wijn", "lunch is vrijwel altijd bruine boterham").
+- GEBRUIK deze feiten actief. Stel ze NIET opnieuw als vraag. Ga er direct vanuit dat ze gelden, tenzij de huidige input expliciet iets anders zegt.
+- Voeg NIEUWE patronen toe via het "remember"-veld in je JSON-antwoord, als array van korte strings (max ~15 woorden per item). Schrijf ze vanuit 3e persoon, in het Nederlands, met genoeg detail om later bruikbaar te zijn (merk, type, hoeveelheid waar van toepassing).
+- Voeg ALLEEN iets toe als:
+  (a) de gebruiker expliciet een patroon uitspreekt ("ik eet altijd X", "standaard doe ik Y", "onthoud dat ik Z gebruik"), OF
+  (b) je na 2+ bevestigingen een duidelijk herhalend patroon ziet dat in vervolgvragen zou helpen.
+- Voeg NIETS toe voor eenmalige keuzes, specifieke porties van één dag, of dingen die al in "Wat Claude onthoudt" staan (geen duplicaten).
+- Laat "remember" weg (of leeg) als er niks nieuws is.
+- Voorbeeld: user zegt "en mijn yoghurt is trouwens altijd halfvolle Campina" → voeg toe: "remember": ["Eet altijd halfvolle yoghurt van Campina."]. Status kan gewoon "complete" blijven voor wat er verder geregistreerd wordt.
 `;
 
 const ANALYSIS_SYSTEM = `Je bent een voedingscoach die op basis van geregistreerde dagtotalen korte, inzichtvolle analyses geeft.
@@ -688,7 +701,7 @@ function EntriesList({ entries, onDelete }) {
   );
 }
 
-function ChatView({ day, onNewEntries, onMessage, targets, profile, history, setHistory, anthropicKey }) {
+function ChatView({ day, onNewEntries, onMessage, onRememberItems, targets, profile, history, setHistory, anthropicKey }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
@@ -816,9 +829,15 @@ function ChatView({ day, onNewEntries, onMessage, targets, profile, history, set
       ).join('\n');
 
       const tIso = todayISO();
+      const remembered = Array.isArray(profile?.remembered) ? profile.remembered : [];
+      const rememberedBlock = remembered.length
+        ? remembered.map(r => `- ${r}`).join('\n')
+        : '(nog niks)';
       const contextMsg = `Vandaag: ${tIso} (${formatDateNL(tIso)}).
 Profiel: ${profile.gender === 'v' ? 'vrouw' : 'man'}, ${profile.age} jr, ${profile.weightKg} kg.
 Dagdoelen: ${targets.kcal} kcal · ${targets.eiwit_g} g eiwit · ${targets.vezels_g} g vezels.
+Wat Claude onthoudt van eerder (gebruik actief, niet opnieuw vragen):
+${rememberedBlock}
 Al geregistreerd vandaag:
 ${todayEntries || '(nog niks)'}
 
@@ -883,6 +902,14 @@ ${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}${recipeBlocks}`;
         const isoRe = /^\d{4}-\d{2}-\d{2}$/;
         const targetDate = (mealData.datum && isoRe.test(mealData.datum)) ? mealData.datum : todayISO();
         onNewEntries(mealData.items, targetDate);
+      }
+
+      // Nieuwe patronen onthouden (alleen als het niet-duplicaten zijn)
+      if (mealData && Array.isArray(mealData.remember) && mealData.remember.length && onRememberItems) {
+        const fresh = mealData.remember
+          .map(s => String(s || '').trim())
+          .filter(Boolean);
+        if (fresh.length) onRememberItems(fresh);
       }
     } catch (e) {
       console.error(e);
@@ -1602,6 +1629,89 @@ function ProfileEditor({ initial, isFirstProfile, legacyDayCount, onSave, onCanc
   );
 }
 
+function MemorySection({ profile, setProfile }) {
+  const items = Array.isArray(profile?.remembered) ? profile.remembered : [];
+  const [draft, setDraft] = useState('');
+
+  function addManual() {
+    const t = draft.trim();
+    if (!t) return;
+    const norm = s => s.toLowerCase().replace(/\s+/g, ' ').trim();
+    const dup = items.some(i => norm(i) === norm(t));
+    if (dup) { setDraft(''); return; }
+    setProfile({ remembered: [...items, t] });
+    setDraft('');
+  }
+  function removeAt(i) {
+    const next = items.filter((_, idx) => idx !== i);
+    setProfile({ remembered: next });
+  }
+  function clearAll() {
+    if (items.length === 0) return;
+    if (!confirm('Alle onthouden patronen wissen?')) return;
+    setProfile({ remembered: [] });
+  }
+
+  return (
+    <div className="bg-white rounded-xl p-4 shadow-sm">
+      <div className="flex items-center justify-between mb-2 gap-2">
+        <h2 className="font-semibold text-slate-800">Wat Claude onthoudt</h2>
+        {items.length > 0 && (
+          <button
+            type="button"
+            onClick={clearAll}
+            className="text-xs text-slate-500 hover:text-red-600 underline underline-offset-2"
+          >
+            alles wissen
+          </button>
+        )}
+      </div>
+      <p className="text-xs text-slate-500 mb-3">
+        Terugkerende voedingspatronen die Claude actief gebruikt zodat-ie niet elke dag dezelfde vraag stelt (bv. "eet altijd halfvolle yoghurt"). Voeg zelf iets toe of laat Claude 't oppikken tijdens de chat.
+      </p>
+
+      {items.length === 0 ? (
+        <div className="text-xs text-slate-400 italic mb-3">Nog niks onthouden.</div>
+      ) : (
+        <ul className="space-y-1.5 mb-3">
+          {items.map((it, i) => (
+            <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
+              <span className="flex-1 leading-snug">{it}</span>
+              <button
+                type="button"
+                onClick={() => removeAt(i)}
+                aria-label="Verwijderen"
+                className="shrink-0 text-slate-400 hover:text-red-600 w-6 h-6 flex items-center justify-center text-lg leading-none"
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addManual(); } }}
+          placeholder="bv. Eet altijd halfvolle Campina-yoghurt"
+          className="flex-1 border rounded px-2 py-1 text-sm"
+        />
+        <button
+          type="button"
+          onClick={addManual}
+          disabled={!draft.trim()}
+          className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-sm rounded px-3 py-1"
+        >
+          +
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseConfig, profile, setProfile, fbStatus, fb, uid, hideProfile, onSwitchProfile }) {
   const [rawFb, setRawFb] = useState(() => firebaseConfig ? JSON.stringify(firebaseConfig, null, 2) : '');
   const [fbErr, setFbErr] = useState(null);
@@ -1795,6 +1905,10 @@ function Settings({ anthropicKey, setAnthropicKey, firebaseConfig, setFirebaseCo
           className="w-full border rounded px-2 py-1 font-mono text-sm"
         />
       </div>
+
+      {!hideProfile && (
+        <MemorySection profile={profile} setProfile={setProfile} />
+      )}
 
       <details className="bg-white rounded-xl p-4 shadow-sm group">
         <summary className="font-semibold text-slate-800 cursor-pointer flex items-center justify-between">
@@ -2254,6 +2368,34 @@ function App() {
     }, 600);
   }
 
+  // Voeg nieuwe onthouden patronen toe aan het actieve profiel.
+  // Deduplicate case-insensitive + whitespace-normalized, en cap op 40 items
+  // (oudste eruit) zodat de prompt niet onbeperkt groeit.
+  async function handleRememberItems(newItems) {
+    if (!activeProfileId || !Array.isArray(newItems) || newItems.length === 0) return;
+    const current = profiles.find(p => p.id === activeProfileId)?.remembered || [];
+    const norm = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const seen = new Set(current.map(norm));
+    const toAdd = [];
+    for (const raw of newItems) {
+      const n = norm(raw);
+      if (!n || seen.has(n)) continue;
+      seen.add(n);
+      toAdd.push(String(raw).trim());
+    }
+    if (toAdd.length === 0) return;
+    const merged = [...current, ...toAdd].slice(-40); // cap
+    // Optimistic local + persist direct (geen debounce — losse event per bericht)
+    setProfiles(ps => ps.map(p => p.id === activeProfileId ? { ...p, remembered: merged } : p));
+    if (!fb) return;
+    try {
+      await updateProfile(fb, activeProfileId, { remembered: merged });
+    } catch (e) {
+      console.error('updateProfile(remembered) failed', e);
+      setSaveError('Geheugen opslaan mislukt: ' + (e.message || e));
+    }
+  }
+
   const fbStatus = !firebaseConfig
     ? 'niet geconfigureerd'
     : fbError
@@ -2423,6 +2565,7 @@ function App() {
                 day={today}
                 onNewEntries={handleNewEntries}
                 onMessage={handleMessages}
+                onRememberItems={handleRememberItems}
                 targets={targets}
                 profile={activeProfile}
                 history={history}
