@@ -929,7 +929,6 @@ ${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}${recipeBlocks}`;
             ref={fileInputRef}
             type="file"
             accept="image/*"
-            capture="environment"
             onChange={handleImagePick}
             className="hidden"
           />
@@ -937,8 +936,8 @@ ${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}${recipeBlocks}`;
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={imageBusy || sending}
-            aria-label="Etiket scannen met camera"
-            title="Etiket scannen"
+            aria-label="Foto of screenshot toevoegen"
+            title="Foto of screenshot toevoegen"
             className="bg-white border border-slate-300 hover:bg-slate-50 active:bg-slate-100 disabled:opacity-50 text-slate-700 rounded-lg px-3 py-2 text-lg min-h-[48px] min-w-[48px] flex items-center justify-center"
           >
             {imageBusy ? '…' : '📷'}
