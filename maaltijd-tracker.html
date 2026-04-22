@@ -695,6 +695,7 @@ function ChatView({ day, onNewEntries, onMessage, targets, profile, history, set
   const [image, setImage] = useState(null); // { base64, mediaType, dataUrl } | null
   const [imageBusy, setImageBusy] = useState(false);
   const [recipeBusy, setRecipeBusy] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const scrollRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -702,9 +703,8 @@ function ChatView({ day, onNewEntries, onMessage, targets, profile, history, set
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [history, sending]);
 
-  async function handleImagePick(e) {
-    const file = e.target.files?.[0];
-    e.target.value = ''; // zelfde bestand opnieuw kunnen kiezen
+  // Gedeelde image-attach (camera-knop, paste, drag-drop gebruiken deze allemaal)
+  async function attachImageFile(file) {
     if (!file) return;
     if (!file.type.startsWith('image/')) {
       setError('Dat is geen afbeelding.');
@@ -720,6 +720,52 @@ function ChatView({ day, onNewEntries, onMessage, targets, profile, history, set
       setError('Kon foto niet verwerken: ' + (err.message || err));
     } finally {
       setImageBusy(false);
+    }
+  }
+
+  async function handleImagePick(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // zelfde bestand opnieuw kunnen kiezen
+    await attachImageFile(file);
+  }
+
+  // Plakken van een plaatje uit clipboard (bv. screenshot met ⌘⇧4 → ⌘V,
+  // of op iOS long-press → Plakken in de textarea).
+  function handlePaste(e) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const it of items) {
+      if (it.kind === 'file' && (it.type || '').startsWith('image/')) {
+        const file = it.getAsFile();
+        if (file) {
+          e.preventDefault(); // voorkom dat een base64-string in de textarea landt
+          attachImageFile(file);
+          return;
+        }
+      }
+    }
+  }
+
+  // Drag & drop op de input-balk
+  function handleDragOver(e) {
+    if (Array.from(e.dataTransfer?.types || []).includes('Files')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      if (!dragOver) setDragOver(true);
+    }
+  }
+  function handleDragLeave(e) {
+    // alleen resetten als we de container daadwerkelijk verlaten
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    setDragOver(false);
+  }
+  function handleDrop(e) {
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer?.files || []);
+    const imgFile = files.find(f => (f.type || '').startsWith('image/'));
+    if (imgFile) {
+      e.preventDefault();
+      attachImageFile(imgFile);
     }
   }
 
@@ -903,13 +949,24 @@ ${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}${recipeBlocks}`;
           <div className="bg-red-50 text-red-700 text-xs rounded-lg p-2">{error}</div>
         )}
       </div>
-      <div className="border-t bg-white p-3 chat-input-pb">
+      <div
+        className={`border-t bg-white p-3 chat-input-pb transition-colors relative ${dragOver ? 'bg-emerald-50' : ''}`}
+        onDragOver={handleDragOver}
+        onDragEnter={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {dragOver && (
+          <div className="absolute inset-1 rounded-lg border-2 border-dashed border-emerald-500 pointer-events-none flex items-center justify-center text-emerald-700 text-sm font-medium bg-emerald-50/80">
+            📎 Laat los om foto toe te voegen
+          </div>
+        )}
         {image && (
           <div className="mb-2 flex items-center gap-2">
             <div className="relative inline-block">
               <img
                 src={image.dataUrl}
-                alt="Foto van etiket"
+                alt="Bijgevoegde foto"
                 className="h-16 w-16 object-cover rounded-lg border border-slate-200"
               />
               <button
@@ -921,7 +978,7 @@ ${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}${recipeBlocks}`;
                 ×
               </button>
             </div>
-            <span className="text-xs text-slate-500">Etiket bijgevoegd — voeg eventueel hoeveelheid toe in tekst.</span>
+            <span className="text-xs text-slate-500">Foto bijgevoegd — voeg eventueel hoeveelheid toe in tekst.</span>
           </div>
         )}
         <div className="flex gap-2 items-end">
@@ -948,8 +1005,9 @@ ${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}${recipeBlocks}`;
             onKeyDown={e => {
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
             }}
+            onPaste={handlePaste}
             rows={2}
-            placeholder={image ? 'Optioneel: hoeveel heb je ervan gegeten?' : 'Typ wat je gegeten hebt…'}
+            placeholder={image ? 'Optioneel: hoeveel heb je ervan gegeten?' : 'Typ, plak of sleep hier…'}
             className="flex-1 border rounded-lg px-3 py-2 text-base sm:text-sm min-h-[48px] focus:outline-none focus:ring-2 focus:ring-emerald-400 resize-none"
           />
           <button
