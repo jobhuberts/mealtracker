@@ -896,6 +896,10 @@ function ChatView({ day, onNewEntries, onMessage, onRememberItems, targets, prof
       content: userText || (sentImage ? '📷 Foto van etiket' : ''),
       ts: Date.now(),
       imagePreview: sentImage ? sentImage.dataUrl : null,
+      // In-memory only — wordt door handleMessages weggehaald voor Firestore.
+      // Hierdoor kan Claude in vervolgberichten de foto blijven zien tot de
+      // registratie compleet is (status === 'complete').
+      image: sentImage ? { base64: sentImage.base64, mediaType: sentImage.mediaType } : null,
     };
     const newHistory = [...history, userMsg];
     setHistory(newHistory);
@@ -950,19 +954,29 @@ ${userText || (sentImage ? '(zie bijgevoegde foto)' : '')}${recipeBlocks}`;
       // dezelfde items uitvoert.
       const claudeMessages = [];
       const tail = newHistory.slice(-8);
-      for (const m of tail) {
-        if (m.role === 'user' && m === tail[tail.length - 1]) {
-          // Laatste user-message: als er een foto bij hoort, multimodale content.
-          if (sentImage) {
+      for (let idx = 0; idx < tail.length; idx++) {
+        const m = tail[idx];
+        const isLast = idx === tail.length - 1;
+        if (m.role === 'user') {
+          // Bij de laatste user-msg sturen we de volledige contextMsg (met dagstatus etc),
+          // bij eerdere user-msgs de oorspronkelijke tekst.
+          const text = isLast ? contextMsg : m.content;
+          // Foto blijft alleen meelopen tot Claude een complete maaltijdregistratie heeft
+          // gedaan. Daarna wordt 'ie afgeknepen om tokens/data te besparen.
+          const completedAfter = tail.slice(idx + 1).some(
+            x => x.role === 'assistant' && x.mealData && x.mealData.status === 'complete'
+          );
+          const includeImage = !!(m.image && m.image.base64) && !completedAfter;
+          if (includeImage) {
             claudeMessages.push({
               role: 'user',
               content: [
-                { type: 'image', source: { type: 'base64', media_type: sentImage.mediaType, data: sentImage.base64 } },
-                { type: 'text', text: contextMsg },
+                { type: 'image', source: { type: 'base64', media_type: m.image.mediaType, data: m.image.base64 } },
+                { type: 'text', text },
               ],
             });
           } else {
-            claudeMessages.push({ role: 'user', content: contextMsg });
+            claudeMessages.push({ role: 'user', content: text });
           }
         } else if (m.role === 'assistant' && m.mealData && Array.isArray(m.mealData.items) && m.mealData.items.length) {
           const d = m.mealData.datum || todayISO();
@@ -2445,7 +2459,14 @@ function App() {
   }
   async function handleMessages(msgs) {
     if (!fb || !activeProfileId) return;
-    await saveDay(fb, activeProfileId, todayISO(), { messages: msgs });
+    // Foto's blijven in-memory (in `history` state). We strippen ze voor Firestore
+    // zodat we geen base64-data en grote dataURL's persisteren.
+    const sanitized = (msgs || []).map(m => {
+      if (!m || (!m.image && !m.imagePreview)) return m;
+      const { image, imagePreview, ...rest } = m;
+      return rest;
+    });
+    await saveDay(fb, activeProfileId, todayISO(), { messages: sanitized });
   }
 
   // Save edits to the active profile (from Settings).
