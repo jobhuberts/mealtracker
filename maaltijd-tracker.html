@@ -606,22 +606,71 @@ async function hasLegacyData(fb, uid) {
    UI COMPONENTS
    ============================================================ */
 
-function NutrientBar({ label, value, target, unit }) {
+function NutrientBar({ label, value, target, unit, entries, nutrientKey }) {
+  const [open, setOpen] = useState(false);
   const pct = Math.min(100, Math.round((value / Math.max(target, 1)) * 100));
   const over = value > target * 1.1;
   const under = value < target * 0.6;
   const color = over ? 'bg-red-400' : under ? 'bg-amber-400' : 'bg-emerald-500';
+  const expandable = Array.isArray(entries) && !!nutrientKey;
+  const contributors = useMemo(() => {
+    if (!expandable) return [];
+    return entries
+      .map(e => ({ name: e.naam, val: Number(e[nutrientKey]) || 0 }))
+      .filter(c => c.val > 0)
+      .sort((a, b) => b.val - a.val);
+  }, [entries, nutrientKey, expandable]);
+  const contribTotal = contributors.reduce((s, c) => s + c.val, 0);
+  function fmt(v) {
+    if (v === 0) return '0';
+    if (v < 1) return v.toFixed(2);
+    if (v < 10) return v.toFixed(1);
+    return Math.round(v);
+  }
   return (
     <div className="mb-2">
-      <div className="flex justify-between text-xs text-slate-600 mb-1">
-        <span>{label}</span>
-        <span className="tabular-nums">
-          {Math.round(value)} / {target} {unit}
-        </span>
+      <div
+        onClick={expandable ? () => setOpen(o => !o) : undefined}
+        role={expandable ? 'button' : undefined}
+        aria-expanded={expandable ? open : undefined}
+        tabIndex={expandable ? 0 : undefined}
+        onKeyDown={expandable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } } : undefined}
+        className={expandable ? 'cursor-pointer select-none -mx-1 px-1 -my-0.5 py-0.5 rounded hover:bg-slate-50 active:bg-slate-100' : ''}
+      >
+        <div className="flex justify-between text-xs text-slate-600 mb-1">
+          <span className="flex items-center gap-1 min-w-0">
+            {expandable && (
+              <span className={`text-slate-400 inline-block leading-none transition-transform ${open ? 'rotate-90' : ''}`}>›</span>
+            )}
+            <span className="truncate">{label}</span>
+          </span>
+          <span className="tabular-nums whitespace-nowrap ml-2">
+            {Math.round(value)} / {target} {unit}
+          </span>
+        </div>
+        <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+          <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
+        </div>
       </div>
-      <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
-        <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
-      </div>
+      {expandable && open && (
+        <div className="mt-1.5 ml-3 space-y-0.5">
+          {contributors.length === 0 ? (
+            <div className="text-xs text-slate-400 italic">Geen bijdragen op deze dag</div>
+          ) : (
+            contributors.map((c, i) => {
+              const share = contribTotal > 0 ? Math.round((c.val / contribTotal) * 100) : 0;
+              return (
+                <div key={i} className="flex justify-between text-xs text-slate-500 tabular-nums">
+                  <span className="truncate flex-1 mr-2">{c.name}</span>
+                  <span className="whitespace-nowrap">
+                    {fmt(c.val)} {unit} <span className="text-slate-400">· {share}%</span>
+                  </span>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -630,7 +679,8 @@ const MACRO_NUTRIENTS = ['kcal','eiwit_g','koolhydraten_g','vet_g','verzadigd_ve
 const MICRO_NUTRIENTS = ['ijzer_mg','calcium_mg','magnesium_mg','kalium_mg','vitC_mg','vitD_ug','vitB12_ug','foliumzuur_ug'];
 
 function DaySummary({ day, targets }) {
-  const totals = useMemo(() => sumEntries(day?.entries || []), [day]);
+  const entries = day?.entries || [];
+  const totals = useMemo(() => sumEntries(entries), [day]);
   const kcalPct = Math.round(((totals.kcal || 0) / (targets.kcal || 1)) * 100);
   return (
     <div className="bg-white rounded-xl p-4 shadow-sm">
@@ -649,6 +699,8 @@ function DaySummary({ day, targets }) {
           value={totals[k] || 0}
           target={targets[k] || 1}
           unit={NUTRIENT_UNITS[k]}
+          entries={entries}
+          nutrientKey={k}
         />
       ))}
 
@@ -660,8 +712,78 @@ function DaySummary({ day, targets }) {
           value={totals[k] || 0}
           target={targets[k] || 1}
           unit={NUTRIENT_UNITS[k]}
+          entries={entries}
+          nutrientKey={k}
         />
       ))}
+    </div>
+  );
+}
+
+function EntryRow({ e, i, onDelete }) {
+  const [open, setOpen] = useState(false);
+  function handleDelete(ev) {
+    ev.stopPropagation();
+    if (!onDelete) return;
+    const ok = window.confirm(`"${e.naam}" verwijderen?`);
+    if (ok) onDelete(i);
+  }
+  function fmt(v) {
+    if (v === 0) return '0';
+    if (v < 1) return v.toFixed(2);
+    if (v < 10) return v.toFixed(1);
+    return Math.round(v);
+  }
+  const nonZero = Object.keys(NUTRIENT_LABELS).filter(k => (Number(e[k]) || 0) > 0);
+  return (
+    <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+      <div
+        onClick={() => setOpen(o => !o)}
+        role="button"
+        aria-expanded={open}
+        tabIndex={0}
+        onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); setOpen(o => !o); } }}
+        className="cursor-pointer select-none p-3 flex justify-between items-start gap-2 hover:bg-slate-50 active:bg-slate-100"
+      >
+        <div className="flex-1 min-w-0 flex items-start gap-1">
+          <span className={`text-slate-400 inline-block leading-none mt-0.5 transition-transform ${open ? 'rotate-90' : ''}`}>›</span>
+          <div className="flex-1 min-w-0">
+            <div className="font-medium text-slate-800 text-sm">{e.naam}</div>
+            <div className="text-xs text-slate-500">{e.hoeveelheid}</div>
+          </div>
+        </div>
+        <div className="text-right text-xs text-slate-600 tabular-nums whitespace-nowrap">
+          <div>{Math.round(e.kcal || 0)} kcal</div>
+          <div className="text-slate-400">E {Math.round(e.eiwit_g || 0)}g · K {Math.round(e.koolhydraten_g || 0)}g · V {Math.round(e.vet_g || 0)}g</div>
+        </div>
+        {onDelete && (
+          <button
+            onClick={handleDelete}
+            aria-label={`Verwijder ${e.naam}`}
+            title="Verwijderen"
+            className="shrink-0 min-w-[44px] min-h-[44px] sm:min-w-[28px] sm:min-h-[28px] w-11 h-11 sm:w-7 sm:h-7 rounded-full text-slate-400 hover:bg-red-100 hover:text-red-600 active:bg-red-200 flex items-center justify-center text-lg sm:text-sm leading-none"
+          >×</button>
+        )}
+      </div>
+      {open && (
+        <div className="border-t border-slate-100 bg-slate-50/60 px-3 py-2">
+          {nonZero.length === 0 ? (
+            <div className="text-xs text-slate-400 italic">Geen voedingswaarden bekend</div>
+          ) : (
+            <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+              {nonZero.map(k => {
+                const v = Number(e[k]) || 0;
+                return (
+                  <div key={k} className="flex justify-between text-xs">
+                    <span className="text-slate-500 truncate mr-2">{NUTRIENT_LABELS[k]}</span>
+                    <span className="text-slate-700 tabular-nums whitespace-nowrap">{fmt(v)} {NUTRIENT_UNITS[k]}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -670,32 +792,10 @@ function EntriesList({ entries, onDelete }) {
   if (!entries || entries.length === 0) {
     return <div className="text-sm text-slate-500 italic">Niks geregistreerd op deze dag.</div>;
   }
-  function handleDelete(i, e) {
-    if (!onDelete) return;
-    const ok = window.confirm(`"${e.naam}" verwijderen?`);
-    if (ok) onDelete(i);
-  }
   return (
     <div className="space-y-2">
       {entries.map((e, i) => (
-        <div key={i} className="bg-white rounded-lg p-3 shadow-sm flex justify-between items-start gap-2 group">
-          <div className="flex-1 min-w-0">
-            <div className="font-medium text-slate-800 text-sm">{e.naam}</div>
-            <div className="text-xs text-slate-500">{e.hoeveelheid}</div>
-          </div>
-          <div className="text-right text-xs text-slate-600 tabular-nums whitespace-nowrap">
-            <div>{Math.round(e.kcal || 0)} kcal</div>
-            <div className="text-slate-400">E {Math.round(e.eiwit_g || 0)}g · K {Math.round(e.koolhydraten_g || 0)}g · V {Math.round(e.vet_g || 0)}g</div>
-          </div>
-          {onDelete && (
-            <button
-              onClick={() => handleDelete(i, e)}
-              aria-label={`Verwijder ${e.naam}`}
-              title="Verwijderen"
-              className="shrink-0 min-w-[44px] min-h-[44px] sm:min-w-[28px] sm:min-h-[28px] w-11 h-11 sm:w-7 sm:h-7 rounded-full text-slate-400 hover:bg-red-100 hover:text-red-600 active:bg-red-200 flex items-center justify-center text-lg sm:text-sm leading-none"
-            >×</button>
-          )}
-        </div>
+        <EntryRow key={i} e={e} i={i} onDelete={onDelete} />
       ))}
     </div>
   );
