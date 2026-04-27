@@ -392,6 +392,13 @@ GEHEUGEN (remember):
 - Voeg NIETS toe voor eenmalige keuzes, specifieke porties van één dag, of dingen die al in "Wat Claude onthoudt" staan (geen duplicaten).
 - Laat "remember" weg (of leeg) als er niks nieuws is.
 - Voorbeeld: user zegt "en mijn yoghurt is trouwens altijd halfvolle Campina" → voeg toe: "remember": ["Eet altijd halfvolle yoghurt van Campina."]. Status kan gewoon "complete" blijven voor wat er verder geregistreerd wordt.
+
+WATER-CHECK BIJ AVONDETEN:
+- In de context staat "Drinkwater vandaag: X ml" — dit is uitsluitend platte drinkwater (geen koffie, thee, fris of alcohol).
+- Als de gebruiker een AVONDMAALTIJD registreert (diner/avondeten — herken aan tijdsindicatie zoals "vanavond", "diner", aan klassieke avond-gerechten zoals pasta/rijst/aardappelen + groente + vlees/vis, of aan expliciete vermelding) ÉN "Drinkwater vandaag" is 0 ml ÉN er staat in dit bericht ook geen water vermeld → vraag in je "reply" vriendelijk hoeveel glazen drinkwater de gebruiker vandaag ongeveer gehad heeft.
+- Registreer de avondmaaltijd zelf gewoon (status="complete" + items). De water-vraag staat los daarvan in de reply — het is een coachende reminder, niet een blokkade.
+- Vraag dit MAXIMAAL ÉÉN keer per dag. Als de "Drinkwater vandaag" later in de dag al > 0 is, niet meer vragen.
+- Vraag dit NIET bij ontbijt of lunch, en NIET als de gebruiker tussendoor expliciet zegt geen water te willen registreren.
 `;
 
 const ANALYSIS_SYSTEM = `Je bent een voedingscoach die op basis van geregistreerde dagtotalen korte, inzichtvolle analyses geeft.
@@ -1098,6 +1105,8 @@ function ChatView({ day, onNewEntries, onMessage, onRememberItems, targets, prof
       const todayEntries = (day?.entries || []).map(e =>
         `- ${e.naam} (${e.hoeveelheid}) — ${Math.round(e.kcal)} kcal`
       ).join('\n');
+      const todayTotalsForCtx = sumEntries(day?.entries || []);
+      const waterToday = Math.round(todayTotalsForCtx.water_ml || 0);
 
       const tIso = todayISO();
       const remembered = Array.isArray(profile?.remembered) ? profile.remembered : [];
@@ -1107,6 +1116,7 @@ function ChatView({ day, onNewEntries, onMessage, onRememberItems, targets, prof
       const contextMsg = `Vandaag: ${tIso} (${formatDateNL(tIso)}).
 Profiel: ${profile.gender === 'v' ? 'vrouw' : 'man'}, ${profile.age} jr, ${profile.weightKg} kg.
 Dagdoelen: ${targets.kcal} kcal · ${targets.eiwit_g} g eiwit · ${targets.vezels_g} g vezels.
+Drinkwater vandaag: ${waterToday} ml (uitsluitend platte drinkwater — geen koffie/thee/fris/alcohol).
 Wat Claude onthoudt van eerder (gebruik actief, niet opnieuw vragen):
 ${rememberedBlock}
 Al geregistreerd vandaag:
